@@ -464,6 +464,7 @@ type MetadataService struct {
 	hooks           metadataServiceHooks
 	imageCacher     ImageCacher
 	imageCacheJobs  ImageCacheJobEnqueuer
+	localArtwork    LocalArtworkCopier
 	autoCacheImages atomic.Bool // hot-reloaded from metadata.cache_images
 	imageResolver   interface {
 		ResolveImageURL(ctx context.Context, path string, variant string) string
@@ -612,7 +613,8 @@ func (s *MetadataService) SetImageCacheJobEnqueuer(enqueuer ImageCacheJobEnqueue
 
 // SetAutoCacheImages controls whether refresh pipelines automatically cache
 // provider images into object storage. Explicit admin image applies still use
-// the configured image cacher when available. Safe for concurrent use.
+// the configured image cacher when available, and local sidecar artwork is
+// copied either way. Safe for concurrent use.
 func (s *MetadataService) SetAutoCacheImages(enabled bool) {
 	s.autoCacheImages.Store(enabled)
 }
@@ -2135,9 +2137,7 @@ func (s *MetadataService) processInternal(ctx context.Context, req ProcessReques
 		}
 		allImages = append(allImages, images...)
 	}
-	if !s.localArtworkUsable() {
-		allImages = withoutLocalImages(allImages)
-	}
+	allImages = withoutUnusableLocalImages(allImages, s.localSourceUsable)
 
 	// Phase 4a: Seasons — resolve with "season" content level.
 	var allSeasons []SeasonResult
@@ -2198,9 +2198,7 @@ func (s *MetadataService) processInternal(ctx context.Context, req ProcessReques
 				// A fill-empty pass keeps the seasons the local provider could read.
 				localMetadataUnreadable |= localArtworkSeason
 			}
-			if !s.localArtworkUsable() {
-				dropLocalSeasonArtwork(seasons)
-			}
+			dropLocalSeasonArtwork(seasons, s.localSourceUsable)
 			if isIdentityHinter {
 				localArtworkSearched |= localArtworkSeason
 			}
@@ -2268,9 +2266,7 @@ func (s *MetadataService) processInternal(ctx context.Context, req ProcessReques
 						// A fill-empty pass keeps the episodes the local provider could read.
 						localMetadataUnreadable |= localArtworkEpisode
 					}
-					if !s.localArtworkUsable() {
-						dropLocalEpisodeArtwork(episodes)
-					}
+					dropLocalEpisodeArtwork(episodes, s.localSourceUsable)
 					if isIdentityHinter {
 						localArtworkSearched |= localArtworkEpisode
 					}
@@ -2889,6 +2885,7 @@ func (s *MetadataService) mergeAndPersist(
 	var localArt *localArtworkRetention
 	if handleArtwork {
 		localArt = newLocalArtworkRetention(ctx, contentID, localArtworkItem)
+		localArt.usable = s.localMetadataURLUsable
 		imageMode := mergeMode
 		if req.localReapply {
 			// Local images always apply; fill-empty keeps the rest of the
@@ -2914,6 +2911,7 @@ func (s *MetadataService) mergeAndPersist(
 	if handleArtwork {
 		prepareItemImagesForQueue(item, existingItem)
 		dropGoneItemOnlyArtwork(localArt, item, images)
+		applyLocalArtworkFallback(item, images, req.Language)
 	}
 
 	if isNew && contentID == "" {
@@ -4519,9 +4517,7 @@ func (s *MetadataService) fetchTargetSeasonResults(ctx context.Context, provider
 				"provider", p.Slug(), "season", seasonNumber, "error", err)
 			continue
 		}
-		if !s.localArtworkUsable() {
-			dropLocalSeasonArtwork(seasons)
-		}
+		dropLocalSeasonArtwork(seasons, s.localSourceUsable)
 		if _, local := p.(IdentityHintProvider); local {
 			searched |= localArtworkSeason
 		}
@@ -4571,9 +4567,7 @@ func (s *MetadataService) fetchTargetEpisodeResults(ctx context.Context, provide
 				"provider", p.Slug(), "season", seasonNumber, "error", err)
 			continue
 		}
-		if !s.localArtworkUsable() {
-			dropLocalEpisodeArtwork(episodes)
-		}
+		dropLocalEpisodeArtwork(episodes, s.localSourceUsable)
 		if _, local := p.(IdentityHintProvider); local {
 			searched |= localArtworkEpisode
 		}
@@ -4595,11 +4589,19 @@ func (s *MetadataService) enqueueSeriesChildImages(ctx context.Context, seriesID
 }
 
 func (s *MetadataService) enqueueImageCacheJobs(ctx context.Context, targetKind, targetID string, inputs []EnqueueImageCacheJobInput) error {
-	if s == nil || !s.autoCacheImages.Load() || s.imageCacheJobs == nil || len(inputs) == 0 {
+	if s == nil || s.imageCacheJobs == nil || len(inputs) == 0 {
 		return nil
 	}
 	enqueueCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
+	inputs = s.copyLocalArtwork(enqueueCtx, targetKind, targetID, inputs)
+	if !s.autoCacheImages.Load() {
+		// Caching off stops remote downloads; local artwork is still queued.
+		inputs, _ = splitLocalImageCacheInputs(inputs)
+	}
+	if len(inputs) == 0 {
+		return nil
+	}
 	if _, err := s.imageCacheJobs.EnqueueBatch(enqueueCtx, inputs); err != nil {
 		slog.WarnContext(ctx, "metadata: failed to enqueue image cache jobs", "component", "metadata",
 			"target_kind", targetKind, "target_id", targetID, "count", len(inputs), "error", err)
@@ -4668,43 +4670,66 @@ func isLocalImageSourcePath(path string) bool {
 
 // localArtworkUsable reports whether refreshes may select local sidecar
 // artwork. A file:// source is never served directly: only an image-cache job
-// copies it into artwork storage. With caching off (metadata.cache_images) or
-// unwired, a chosen local image would leave the slot empty instead of falling
-// back to provider artwork, so refreshes ignore local art altogether.
+// copies it into artwork storage. Without the queue (no artwork store wired), a
+// chosen local image would leave the slot empty instead of falling back to
+// provider artwork, so refreshes ignore local art altogether.
+// metadata.cache_images does not matter: it governs remote downloads, and
+// local art is copied either way.
 func (s *MetadataService) localArtworkUsable() bool {
-	return s != nil && s.autoCacheImages.Load() && s.imageCacheJobs != nil
+	return s != nil && s.imageCacheJobs != nil
+}
+
+// localSourceUsable reports whether a refresh may select a local artwork
+// source: a sidecar file whenever local artwork is usable, and an image URL an
+// NFO names only while metadata.cache_images is on. Such a URL is never served
+// directly, and the image cache's download is the only path that fetches it,
+// so with caching off it would leave the slot empty instead of falling back to
+// provider artwork.
+func (s *MetadataService) localSourceUsable(source string) bool {
+	return s.localArtworkUsable() && s.localMetadataURLUsable(source)
+}
+
+// localMetadataURLUsable reports whether source may be used when it is an
+// image URL an NFO names: only while metadata.cache_images is on. Any other
+// source passes.
+func (s *MetadataService) localMetadataURLUsable(source string) bool {
+	if _, nfoURL := localMetadataImageURL(source); nfoURL {
+		return s.autoCacheImages.Load()
+	}
+	return true
+}
+
+// withoutUnusableLocalImages returns images minus the local candidates usable
+// rejects. It returns images itself when it rejects none.
+func withoutUnusableLocalImages(images []RemoteImage, usable func(string) bool) []RemoteImage {
+	unusable := func(img RemoteImage) bool { return isLocalImageSourcePath(img.URL) && !usable(img.URL) }
+	if !slices.ContainsFunc(images, unusable) {
+		return images
+	}
+	return slices.DeleteFunc(slices.Clone(images), unusable)
 }
 
 // withoutLocalImages returns images minus local sidecar candidates. It returns
 // images itself when none are local.
 func withoutLocalImages(images []RemoteImage) []RemoteImage {
-	if !slices.ContainsFunc(images, func(img RemoteImage) bool { return isLocalImageSourcePath(img.URL) }) {
-		return images
-	}
-	remote := make([]RemoteImage, 0, len(images))
-	for _, img := range images {
-		if !isLocalImageSourcePath(img.URL) {
-			remote = append(remote, img)
-		}
-	}
-	return remote
+	return withoutUnusableLocalImages(images, func(string) bool { return false })
 }
 
-// dropLocalSeasonArtwork clears local sidecar posters so a later provider in
-// the chain can fill the slot.
-func dropLocalSeasonArtwork(seasons []SeasonResult) {
+// dropLocalSeasonArtwork clears the local posters usable rejects so a later
+// provider in the chain can fill the slot.
+func dropLocalSeasonArtwork(seasons []SeasonResult, usable func(string) bool) {
 	for i := range seasons {
-		if isLocalImageSourcePath(seasons[i].PosterPath) {
+		if isLocalImageSourcePath(seasons[i].PosterPath) && !usable(seasons[i].PosterPath) {
 			seasons[i].PosterPath = ""
 		}
 	}
 }
 
-// dropLocalEpisodeArtwork clears local sidecar stills so a later provider in
-// the chain can fill the slot.
-func dropLocalEpisodeArtwork(episodes []EpisodeResult) {
+// dropLocalEpisodeArtwork clears the local stills usable rejects so a later
+// provider in the chain can fill the slot.
+func dropLocalEpisodeArtwork(episodes []EpisodeResult, usable func(string) bool) {
 	for i := range episodes {
-		if isLocalImageSourcePath(episodes[i].StillPath) {
+		if isLocalImageSourcePath(episodes[i].StillPath) && !usable(episodes[i].StillPath) {
 			episodes[i].StillPath = ""
 		}
 	}
@@ -4748,16 +4773,20 @@ func splitProviderImagePath(path string) (servedPath, sourcePath string) {
 func preserveCachedArtwork(providerPath, providerThumbhash, existingCachedPath, existingSourcePath, existingThumbhash string) (string, string, string) {
 	// A local file:// source must never land in the served *_path column: it
 	// routes into *_source_path and, during the pre-cache window, the path
-	// keeps the prior cached key (or stays empty) until the job completes.
+	// keeps the prior cached key or remote stand-in (or stays empty) until the
+	// job completes.
+	keepExisting := isCachedImagePath(existingCachedPath) || isLocalArtworkStandIn(existingCachedPath, existingSourcePath)
 	if isLocalImageSourcePath(providerPath) {
 		providerPath = strings.TrimSpace(providerPath)
-		if isCachedImagePath(existingCachedPath) {
+		if keepExisting {
 			return existingCachedPath, existingThumbhash, providerPath
 		}
 		return "", "", providerPath
 	}
 	if !isRemoteImageSourcePath(providerPath) {
-		if strings.TrimSpace(providerPath) == "" && isCachedImagePath(existingCachedPath) {
+		// With nothing offered, a slot keeps what it has, including a local
+		// source whose copy is still pending.
+		if strings.TrimSpace(providerPath) == "" && (isCachedImagePath(existingCachedPath) || isLocalImageSourcePath(existingSourcePath)) {
 			return existingCachedPath, existingThumbhash, existingSourcePath
 		}
 		return providerPath, providerThumbhash, ""
@@ -4843,6 +4872,7 @@ func accumulateEpisodeResults(accumulator map[episodeResultKey]*EpisodeResult, e
 			continue
 		}
 
+		recordEpisodeStillFallback(existing, episode)
 		preferLocalEpisodeStill(existing, &episode)
 		MergeEpisodeResult(&episode, existing, MergeFillEmpty)
 	}
@@ -5272,6 +5302,7 @@ func (s *MetadataService) persistSeasonAndEpisodeRows(
 	imagesLocked := artworkLocked(series)
 	imageJobs := make([]EnqueueImageCacheJobInput, 0, len(seasons)+len(episodes))
 	seasonArtwork := newLocalArtworkRetention(ctx, seriesID, localArtworkSeason)
+	seasonArtwork.usable = s.localMetadataURLUsable
 	episodeArtwork := seasonArtwork.atLevel(localArtworkEpisode)
 	fallbackProvider := primaryProviderID(providerIDs)
 	keyAttribution := func(sourcePath string) (string, string) {
@@ -5426,7 +5457,7 @@ func (s *MetadataService) persistSeasonAndEpisodeRows(
 			// preserveCachedArtwork sees the raw provider path so a local
 			// file:// source still routes into *_source_path here.
 			nextPath, nextThumbhash, nextSourcePath := preserveCachedArtwork(
-				seasonArtwork.providerPath(ImagePoster, season.PosterPath, existingSeason.PosterPath, existingSeason.PosterSourcePath),
+				seasonArtwork.providerPath(ImagePoster, season.PosterPath, existingSeason.PosterSourcePath),
 				season.PosterThumbhash,
 				existingSeason.PosterPath,
 				existingSeason.PosterSourcePath,
@@ -5441,6 +5472,19 @@ func (s *MetadataService) persistSeasonAndEpisodeRows(
 			mergedSeason.PosterThumbhash = nextThumbhash
 			mergedSeason.PosterSourcePath = nextSourcePath
 			providerSeason = mergedSeason
+		}
+		if !imagesLocked && providerSeason.PosterPath == "" {
+			// The stand-in is the remote poster local art displaced or, when
+			// retention kept a local source this refresh could not see, the
+			// remote poster the refresh chose.
+			fallback, fallbackThumbhash := season.remotePosterPath, season.remotePosterThumbhash
+			if fallback == "" {
+				fallback, fallbackThumbhash = season.PosterPath, season.PosterThumbhash
+			}
+			providerSeason.PosterPath = localArtworkFallbackPath("", providerSeason.PosterSourcePath, fallback)
+			if providerSeason.PosterPath != "" {
+				providerSeason.PosterThumbhash = fallbackThumbhash
+			}
 		}
 		dbSeason := &models.Season{
 			SeriesID:                seriesID,
@@ -5825,7 +5869,7 @@ func (s *MetadataService) persistSeasonAndEpisodeRows(
 				// preserveCachedArtwork sees the raw provider path so a local
 				// file:// source still routes into *_source_path here.
 				nextPath, nextThumbhash, nextSourcePath := preserveCachedArtwork(
-					episodeArtwork.providerPath(ImageStill, ep.StillPath, existingEpisode.StillPath, existingEpisode.StillSourcePath),
+					episodeArtwork.providerPath(ImageStill, ep.StillPath, existingEpisode.StillSourcePath),
 					ep.StillThumbhash,
 					existingEpisode.StillPath,
 					existingEpisode.StillSourcePath,
@@ -5840,6 +5884,11 @@ func (s *MetadataService) persistSeasonAndEpisodeRows(
 				mergedEpisode.StillThumbhash = nextThumbhash
 				mergedEpisode.StillSourcePath = nextSourcePath
 				providerEpisode = mergedEpisode
+			}
+			if !imagesLocked {
+				// As for season posters, ep.StillPath stands in when retention
+				// kept a local source.
+				providerEpisode.StillPath = localArtworkFallbackPath(providerEpisode.StillPath, providerEpisode.StillSourcePath, firstNonEmpty(ep.stillFallback, ep.StillPath))
 			}
 			dbEp := &models.Episode{
 				SeriesID:                seriesID,
@@ -8771,7 +8820,7 @@ func prepareItemImagesForQueue(item, existing *models.MediaItem) {
 }
 
 func (s *MetadataService) enqueueItemImages(ctx context.Context, item *models.MediaItem, providerIDs map[string]string, images []RemoteImage) error {
-	if s == nil || !s.autoCacheImages.Load() || s.imageCacheJobs == nil || item == nil || item.ContentID == "" {
+	if s == nil || s.imageCacheJobs == nil || item == nil || item.ContentID == "" {
 		return nil
 	}
 	inputs := make([]EnqueueImageCacheJobInput, 0, 3)
@@ -8802,7 +8851,7 @@ func (s *MetadataService) enqueueItemImages(ctx context.Context, item *models.Me
 }
 
 func (s *MetadataService) enqueueItemLocalizationImages(ctx context.Context, item *models.MediaItem, loc *models.MediaItemLocalization, providerIDs map[string]string, images []RemoteImage) {
-	if s == nil || !s.autoCacheImages.Load() || s.imageCacheJobs == nil || item == nil || loc == nil || loc.ContentID == "" || loc.Language == "" {
+	if s == nil || s.imageCacheJobs == nil || item == nil || loc == nil || loc.ContentID == "" || loc.Language == "" {
 		return
 	}
 	locItem := &models.MediaItem{

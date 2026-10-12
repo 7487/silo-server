@@ -377,14 +377,70 @@ Caching and refresh:
   clamping reads the parent directory). A replaced image rotates the key; the
   stale hashed prefix is deleted after a successful re-cache, and item
   deletion trims local paths to the content prefix.
-- The processor confines each read to the owning library's `media_folders`
-  roots: a lexical check on the logical path, then a symlink-resolving re-check
-  (both path and roots are resolved, so a legitimately symlinked root stays
-  valid while an intermediate directory symlink escaping a root is rejected).
-  Missing/unreadable/out-of-root and structurally-unusable (non-regular,
-  over-cap) paths are stable failures with a long retry deferral; recovery is
-  refresh-driven — the provider-artwork backfill sweep deliberately skips
-  `file://` sources.
+- The process that discovered the sidecar copies it
+  (`internal/metadata/local_artwork_copy.go`). Only `api` and `integrated`
+  processes run refreshes and the image cache, and a refresh can only discover
+  a file it can read, so that process sees the library mount. The refresh hands
+  the local slots whose files it sees (item, season, episode; the copier takes any target type, and
+  a person photo carries the owning item's content ID as `series_id` for root
+  confinement) to `ImageCacheProcessor.CopyLocalArtwork`, which queues the jobs
+  behind a 10-minute discovery hold that other drains respect and copies them
+  on two background workers per process, claiming each job by slot. That claim
+  ignores the hold and a missing-storage deferral, but not the backoff of an
+  attempt that failed. The copies
+  share one per-process budget with the queue drain and manual refreshes,
+  sized from `metadata.image_workers` and its memory cap. Freed slots go to
+  waiting callers in arrival order, a manual refresh ahead of background work;
+  a claimed job that cannot start in time to finish inside its lease goes back
+  to the queue.
+  Refreshes never wait for a copy, and a manual refresh claims its own held
+  discoveries without making them due for other servers, handing back any it
+  cannot start still held. A slot that does not fit the in-memory backlog
+  waits out the hold, after which any drain copies it.
+- The queue keeps local jobs for retries, and any server may claim one. The
+  processor confines each read to the owning library's `media_folders` roots:
+  a lexical check on the logical path, then a symlink-resolving re-check (both
+  path and roots are resolved, so a legitimately symlinked root stays valid
+  while an intermediate directory symlink escaping a root is rejected). When
+  the re-check or the read fails, the processor probes, through
+  `internal/rootcheck`, the nearest folder that exists at or above the file's
+  folder, searching no higher than the library root: unless it lists entries
+  or exists but denies listing (or is reached through a symlink out of the
+  library, so the path escapes it), the storage is not mounted on this server (an
+  empty or missing mount point, also for a share nested inside a present
+  root, or a folder that fails to read or does not answer in time). A folder
+  removed under mounted storage is therefore a stable failure, not a deferral. A
+  deferred job goes back to the queue without counting an attempt, for a
+  server that has the mount: after 10 minutes, or an hour when it was last
+  deferred for the same reason, so storage no server mounts any more stays
+  cheap. A local source that a refresh on a server without the mount keeps
+  (see retention below) is queued the usual way, not handed to that server's
+  copier, so its hold or deferral stays as it was; and a copy that claims a
+  deferred job early leaves it its remaining wait (at least 10 minutes). A
+  manual refresh makes such a job due again and starts its deferral
+  over, and reports its artwork as still pending while a job of its target
+  waits this way. Otherwise missing/unreadable/out-of-root and
+  structurally-unusable (non-regular, over-cap) paths are stable failures with
+  a long retry deferral; recovery is refresh-driven — the provider-artwork
+  backfill sweep deliberately skips `file://` sources.
+- Until the copy lands, a slot keeps serving the copy it already has. With
+  nothing cached, it serves the best remote image the refresh found: for items
+  the best remote candidate by the `applyBestImages` rules, for seasons and
+  episodes the first remote poster or still that the local one displaced while
+  provider results merged, or, when the refresh kept a local source it could
+  not see, the remote one it chose. The slot's source stays the local file, so the
+  copy replaces the stand-in through the source-matched update, and a refresh
+  that offers no artwork at all leaves the slot, local source included, as it
+  is. Locked artwork gets no stand-in, and neither does an image URL an NFO
+  names: its slot stays empty until the image cache has downloaded it.
+- `metadata.cache_images` governs remote artwork only. With it off, local art
+  files are still selected, copied, and served: the drain claims local jobs
+  only (through the partial index `metadata_image_cache_jobs_local_due_idx`, so
+  remote jobs left queued are not read), a manual refresh waits for local jobs
+  only, and the provider-artwork backfill stays off. An image URL an NFO names
+  is a download, never served directly, so with caching off it is not selected
+  (`localSourceUsable`) and the slot takes provider artwork, as it does for
+  person photos.
 
 Precedence: local artwork beats remote providers wherever the NFO provider
 sits in the chain.
@@ -398,8 +454,11 @@ sits in the chain.
   write that touches only a season's localization row (a refresh in a
   language other than the item's canonical one) stores that provider poster,
   as item localization rows skip local candidates.
-- A refresh that does not rediscover a slot's cached local copy (a `local/`
-  key with a `file://` source) keeps it unless the sidecar's own folder answers
+- A refresh that does not rediscover a slot's local art (a `file://` source,
+  served from its cached `local/` copy or, while that copy is pending, from
+  what the slot served before or a remote stand-in) keeps it, so a server
+  without the mount cannot hand the slot and its queued job to a provider,
+  unless the sidecar's own folder answers
   and lists entries: then the file is either missing or still on disk but no
   longer offered (renamed out of the naming rules, replaced by a better match,
   or local metadata disabled), and the slot takes the provider's art. A folder
@@ -415,7 +474,9 @@ sits in the chain.
   with local metadata off for that level, during an Identify, in a run that
   leaves local metadata out because the NFO names another title (see
   Identity above), or when the local provider's call failed, cached local art
-  is stored artwork like any other and no library folder is probed.
+  is stored artwork like any other and no library folder is probed. A slot
+  such a refresh, or one with locked artwork, leaves on its remote stand-in
+  keeps its local source, as a slot left on its cached copy does.
 - Banner, thumb, clear art, disc art and the backdrops after the primary come
   only from sidecars today, so the rule above has no provider art to fall back
   to. When a refresh searched the item level and did not return a slot's
@@ -434,12 +495,8 @@ sits in the chain.
   candidates, and the read-side overlay (`internal/catalog/localize.go`) keeps
   base art served from a `local/` key (`artworkkey.IsLocal`), so a viewer in
   another language sees the same local art. A slot whose local copy is not
-  cached yet still serves its earlier art, which a localized image may
-  replace.
-
-**Deployment constraint:** the host running the metadata image-cache processor
-must mount the media libraries at the same paths as the scanner/metadata
-worker, otherwise local artwork jobs fail until the mount is present.
+  cached yet still serves its earlier art or remote stand-in, which a
+  localized image may replace.
 
 ### Artwork and photos an NFO names
 
@@ -486,8 +543,9 @@ source, or a local file in the same folder). A provider's photo, even one
 still waiting for its copy, stays. It queues a person image-cache job whose `series_id` is the
 title, so the processor confines a local read to that title's library roots;
 a title's interactive artwork refresh leaves those person jobs out of its
-scope. A person refresh keeps a cached NFO photo over a provider's. Like all
-local artwork, these need `metadata.cache_images`.
+scope. A person refresh keeps a cached NFO photo over a provider's. Like other
+local artwork, a sidecar photo is copied whatever `metadata.cache_images` says;
+a photo URL an NFO names is used only while the setting is on.
 
 ## Series depth and mixed libraries
 

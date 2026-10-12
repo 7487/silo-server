@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Silo-Server/silo-server/internal/artworkkey"
 	"github.com/Silo-Server/silo-server/internal/models"
 	"github.com/Silo-Server/silo-server/internal/rootcheck"
 )
@@ -124,6 +123,11 @@ type localArtworkRetention struct {
 	// probes memoizes folder probes, so the episodes of one season folder
 	// cost one probe. Retentions made with atLevel share it.
 	probes map[string]rootcheck.Result
+	// usable, when set, rejects local sources this refresh may not use (an
+	// image URL an NFO names while caching is off, see
+	// MetadataService.localMetadataURLUsable); such a source is never kept.
+	// Searched levels already imply that local artwork is usable at all.
+	usable func(source string) bool
 }
 
 func newLocalArtworkRetention(ctx context.Context, contentID string, level localArtworkLevel) *localArtworkRetention {
@@ -144,16 +148,19 @@ func (r *localArtworkRetention) atLevel(level localArtworkLevel) *localArtworkRe
 	return &other
 }
 
-// keep reports whether a slot of imageType serving a cached copy of a local
-// sidecar should ignore the remote incoming path this refresh chose.
-func (r *localArtworkRetention) keep(imageType ImageType, incoming, existingPath, existingSource string) bool {
+// keep reports whether a slot of imageType whose stored source is a local
+// sidecar should ignore the remote incoming path this refresh chose. The slot
+// serves the sidecar's cached copy or, while that copy is pending, the image
+// it served before or a remote stand-in; either way the local source must
+// survive a refresh that cannot see the sidecar.
+func (r *localArtworkRetention) keep(imageType ImageType, incoming, existingSource string) bool {
 	gone := r.sidecarGone
 	if imageType == ImageBackdrop {
 		gone = r.backdropSidecarGone
 	}
 	if !r.searched ||
-		!artworkkey.IsLocal(existingPath) ||
 		!isLocalImageSourcePath(existingSource) ||
+		(r.usable != nil && !r.usable(existingSource)) ||
 		!isRemoteImageSourcePath(incoming) ||
 		gone(existingSource) {
 		return false
@@ -163,29 +170,36 @@ func (r *localArtworkRetention) keep(imageType ImageType, incoming, existingPath
 	return true
 }
 
-// providerPath returns the path a season or episode slot of imageType should
-// treat as the provider's choice: the stored local source when keep holds,
-// else incoming.
-func (r *localArtworkRetention) providerPath(imageType ImageType, incoming, existingPath, existingSource string) string {
-	if r.keep(imageType, incoming, existingPath, existingSource) {
+// providerPath returns the path a slot of imageType should treat as the
+// provider's choice: the stored local source when keep holds, else incoming.
+func (r *localArtworkRetention) providerPath(imageType ImageType, incoming, existingSource string) string {
+	if r.keep(imageType, incoming, existingSource) {
 		return existingSource
 	}
 	return incoming
 }
 
-// keepUnconfirmedLocalItemArtwork restores the cached path of each item
-// artwork slot that applyBestImages moved from cached local art to a remote
-// image, when keep holds. prepareItemImagesForQueue then keeps the stored
-// local source. retention is the item level's (localArtworkItem).
+// keepUnconfirmedLocalItemArtwork puts the stored local source back in each
+// item artwork slot that applyBestImages moved from local art to a remote
+// image, when keep holds. prepareItemImagesForQueue then routes it into the
+// source column and keeps the slot's served path. A slot left on its remote
+// stand-in by a refresh that cannot judge the sidecar (artwork locked, or
+// local art not searched at this level) keeps its local source too, as a slot
+// left on its cached copy does. retention is the item level's
+// (localArtworkItem).
 func keepUnconfirmedLocalItemArtwork(retention *localArtworkRetention, item, existing *models.MediaItem) {
 	if item == nil || existing == nil {
 		return
 	}
+	locked := artworkLocked(existing)
 	stored := itemArtworkFields(existing)
 	for i, field := range itemArtworkFields(item) {
-		if retention.keep(field.imageType, *field.path, *stored[i].path, *stored[i].source) {
-			*field.path = *stored[i].path
+		storedPath, storedSource := *stored[i].path, *stored[i].source
+		if (locked || !retention.searched) && *field.path == storedPath && isLocalArtworkStandIn(storedPath, storedSource) {
+			*field.path = storedSource
+			continue
 		}
+		*field.path = retention.providerPath(field.imageType, *field.path, storedSource)
 	}
 }
 

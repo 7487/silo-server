@@ -212,6 +212,15 @@ func (r *ImageCacheJobRepository) EnqueueBatch(ctx context.Context, inputs []Enq
 }
 
 func (r *ImageCacheJobRepository) enqueueBatch(ctx context.Context, inputs []EnqueueImageCacheJobInput, requeueSucceeded bool) (int, error) {
+	return r.upsertImageCacheJobs(ctx, inputs, requeueSucceeded, 0, nil)
+}
+
+// upsertImageCacheJobs upserts jobs. A positive hold makes every row it queues
+// or re-queues due only after the hold, so background drains leave it alone
+// while the caller works through it (see enqueueHeldLocalJobs). When queued is
+// non-nil, it also receives the target key and source of every row left
+// queued.
+func (r *ImageCacheJobRepository) upsertImageCacheJobs(ctx context.Context, inputs []EnqueueImageCacheJobInput, requeueSucceeded bool, hold time.Duration, queued *[]EnqueueImageCacheJobInput) (int, error) {
 	if r == nil || r.pool == nil {
 		return 0, nil
 	}
@@ -244,7 +253,7 @@ func (r *ImageCacheJobRepository) enqueueBatch(ctx context.Context, inputs []Enq
 	}{{plain, false}, {requeue, true}} {
 		for start := 0; start < len(group.inputs); start += 250 {
 			end := min(start+250, len(group.inputs))
-			affected, err := r.enqueueBatchChunk(ctx, group.inputs[start:end], group.requeue)
+			affected, err := r.enqueueBatchChunk(ctx, group.inputs[start:end], group.requeue, hold, queued)
 			if err != nil {
 				return total, err
 			}
@@ -272,9 +281,12 @@ func normalizeImageCacheJobInput(in EnqueueImageCacheJobInput) (EnqueueImageCach
 	return in, true
 }
 
-func (r *ImageCacheJobRepository) enqueueBatchChunk(ctx context.Context, inputs []EnqueueImageCacheJobInput, requeueSucceeded bool) (int, error) {
+func (r *ImageCacheJobRepository) enqueueBatchChunk(ctx context.Context, inputs []EnqueueImageCacheJobInput, requeueSucceeded bool, hold time.Duration, queued *[]EnqueueImageCacheJobInput) (int, error) {
 	var sql strings.Builder
-	args := make([]any, 0, len(inputs)*11+1)
+	args := make([]any, 0, len(inputs)*11+2)
+	// Arg 1 is the hold. Rows re-queued by the conflict branch below take the
+	// inserted row's next_attempt_at, so both paths honor it.
+	args = append(args, intervalLiteral(max(hold, 0)))
 	sql.WriteString(`
 		INSERT INTO metadata_image_cache_jobs (
 			target_type, target_content_id, target_language, series_id, source_path,
@@ -288,7 +300,7 @@ func (r *ImageCacheJobRepository) enqueueBatchChunk(ctx context.Context, inputs 
 			sql.WriteString(", ")
 		}
 		base := len(args)
-		fmt.Fprintf(&sql, `($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, 'queued', 0, NOW(), NULL, '', '', NOW(), NOW(), NULL)`,
+		fmt.Fprintf(&sql, `($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, 'queued', 0, NOW() + $1::interval, NULL, '', '', NOW(), NOW(), NULL)`,
 			base+1, base+2, base+3, base+4, base+5,
 			base+6, base+7, base+8, base+9, base+10, base+11)
 		args = append(args,
@@ -334,13 +346,21 @@ func (r *ImageCacheJobRepository) enqueueBatchChunk(ctx context.Context, inputs 
 			END,
 			next_attempt_at = CASE
 				WHEN metadata_image_cache_jobs.source_path IS DISTINCT FROM EXCLUDED.source_path
-					THEN NOW()
+					THEN EXCLUDED.next_attempt_at
 				WHEN metadata_image_cache_jobs.status = 'failed'
 					AND metadata_image_cache_jobs.next_attempt_at <= NOW()
-					THEN NOW()
+					THEN EXCLUDED.next_attempt_at
 				WHEN $%d::boolean
 					AND metadata_image_cache_jobs.status = 'succeeded'
-					THEN NOW()
+					THEN EXCLUDED.next_attempt_at
+				-- A held enqueue also holds a due job that has not failed
+				-- (fresh, or deferred for missing storage), so the caller can
+				-- claim it before other drains do; an active hold is kept.
+				WHEN $1::interval > interval '0'
+					AND metadata_image_cache_jobs.status = 'queued'
+					AND metadata_image_cache_jobs.attempt_count = 0
+					AND metadata_image_cache_jobs.next_attempt_at <= NOW()
+					THEN EXCLUDED.next_attempt_at
 				ELSE metadata_image_cache_jobs.next_attempt_at
 			END,
 			locked_at = CASE
@@ -407,11 +427,36 @@ func (r *ImageCacheJobRepository) enqueueBatchChunk(ctx context.Context, inputs 
 		requeueSucceededArg,
 		requeueSucceededArg)
 
-	tag, err := r.pool.Exec(ctx, sql.String(), args...)
+	if queued == nil {
+		tag, err := r.pool.Exec(ctx, sql.String(), args...)
+		if err != nil {
+			return 0, fmt.Errorf("enqueuing metadata image cache jobs: %w", err)
+		}
+		return int(tag.RowsAffected()), nil
+	}
+	sql.WriteString(`
+		RETURNING target_type, target_content_id, image_type, target_language, source_path, status`)
+	rows, err := r.pool.Query(ctx, sql.String(), args...)
 	if err != nil {
 		return 0, fmt.Errorf("enqueuing metadata image cache jobs: %w", err)
 	}
-	return int(tag.RowsAffected()), nil
+	defer rows.Close()
+	affected := 0
+	for rows.Next() {
+		var in EnqueueImageCacheJobInput
+		var status string
+		if err := rows.Scan(&in.TargetType, &in.TargetContentID, &in.ImageType, &in.TargetLanguage, &in.SourcePath, &status); err != nil {
+			return affected, fmt.Errorf("scanning enqueued metadata image cache job: %w", err)
+		}
+		affected++
+		if status == ImageCacheStatusQueued {
+			*queued = append(*queued, in)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return affected, fmt.Errorf("enqueuing metadata image cache jobs: %w", err)
+	}
+	return affected, nil
 }
 
 // imageCacheTargetScope matches every job an interactive refresh of one
@@ -476,10 +521,10 @@ func (r *ImageCacheJobRepository) ClaimDue(ctx context.Context, workerID string,
 	if err := r.recoverExpiredRunning(ctx, ""); err != nil {
 		return nil, err
 	}
-	return r.claimDue(ctx, workerID, "", limit)
+	return r.claimDue(ctx, workerID, "", false, limit)
 }
 
-func (r *ImageCacheJobRepository) retryTargetNow(ctx context.Context, targetContentID string) error {
+func (r *ImageCacheJobRepository) retryTargetNow(ctx context.Context, targetContentID string, localOnly bool) error {
 	if r == nil || r.pool == nil {
 		return nil
 	}
@@ -494,35 +539,44 @@ func (r *ImageCacheJobRepository) retryTargetNow(ctx context.Context, targetCont
 	// immediate retry, it does not reset the retry budget a background worker
 	// already spent on artwork that keeps failing. Failed rows are requeued
 	// regardless of their timer; queued rows are only pulled forward while
-	// they are still deferred, so the reset stays a small, one-off write.
-	// CacheTargetArtwork runs this once per refresh, not once per poll.
-	_, err := r.pool.Exec(ctx, `
+	// they are still deferred, or carry a missing-storage deferral to start
+	// over, so the reset stays a small, one-off write. CacheTargetArtwork runs
+	// this once per refresh, not once per poll.
+	query := `
 		UPDATE metadata_image_cache_jobs
 		SET status = 'queued',
 			next_attempt_at = NOW(),
 			locked_at = NULL,
 			locked_by = '',
+			-- A deferral for missing storage starts over, so a refresh on a
+			-- server without the mount does not push it to the long repeat
+			-- delay.
+			last_error = CASE WHEN starts_with(last_error, $2) THEN '' ELSE last_error END,
 			completed_at = NULL,
 			updated_at = NOW()
-		WHERE `+imageCacheTargetScope("$1")+`
+		WHERE ` + imageCacheTargetScope("$1") + `
 		  AND status IN ('queued', 'failed')
-		  AND (status = 'failed' OR next_attempt_at > NOW())
-	`, targetContentID)
+		  AND (status = 'failed' OR next_attempt_at > NOW() OR starts_with(last_error, $2))
+		  AND NOT ` + heldLocalDiscoverySQL
+	if localOnly {
+		query += " AND " + localImageCacheSourceSQL
+	}
+	_, err := r.pool.Exec(ctx, query, targetContentID, localImageStorageUnavailable)
 	if err != nil {
 		return fmt.Errorf("retrying target metadata image cache jobs: %w", err)
 	}
 	return nil
 }
 
-func (r *ImageCacheJobRepository) claimDueForTarget(ctx context.Context, workerID, targetContentID string, limit int) ([]*models.MetadataImageCacheJob, error) {
+func (r *ImageCacheJobRepository) claimDueForTarget(ctx context.Context, workerID, targetContentID string, localOnly bool, limit int) ([]*models.MetadataImageCacheJob, error) {
 	targetContentID = strings.TrimSpace(targetContentID)
 	if targetContentID == "" {
 		return nil, nil
 	}
-	return r.claimDue(ctx, workerID, targetContentID, limit)
+	return r.claimDue(ctx, workerID, targetContentID, localOnly, limit)
 }
 
-func (r *ImageCacheJobRepository) targetHasRunningJobs(ctx context.Context, targetContentID string) (bool, error) {
+func (r *ImageCacheJobRepository) targetHasRunningJobs(ctx context.Context, targetContentID string, localOnly bool) (bool, error) {
 	if r == nil || r.pool == nil {
 		return false, nil
 	}
@@ -530,37 +584,61 @@ func (r *ImageCacheJobRepository) targetHasRunningJobs(ctx context.Context, targ
 	if targetContentID == "" {
 		return false, nil
 	}
-	var running bool
-	if err := r.pool.QueryRow(ctx, `
+	query := `
 		SELECT EXISTS (
 			SELECT 1
 			FROM metadata_image_cache_jobs
-			WHERE `+imageCacheTargetScope("$1")+`
-			  AND status = 'running'
-		)
-	`, targetContentID).Scan(&running); err != nil {
+			WHERE ` + imageCacheTargetScope("$1") + `
+			  AND status = 'running'`
+	if localOnly {
+		query += " AND " + localImageCacheSourceSQL
+	}
+	var running bool
+	if err := r.pool.QueryRow(ctx, query+")", targetContentID).Scan(&running); err != nil {
 		return false, fmt.Errorf("checking running metadata image cache jobs: %w", err)
 	}
 	return running, nil
 }
 
-func (r *ImageCacheJobRepository) claimDue(ctx context.Context, workerID, targetContentID string, limit int) ([]*models.MetadataImageCacheJob, error) {
+// claimDue claims due queued jobs, optionally only those for one target scope
+// and only local file:// sources.
+func (r *ImageCacheJobRepository) claimDue(ctx context.Context, workerID, targetContentID string, localOnly bool, limit int) ([]*models.MetadataImageCacheJob, error) {
 	if r == nil || r.pool == nil || limit <= 0 {
 		return nil, nil
+	}
+	args := []any{limit, workerID}
+	if targetContentID != "" {
+		args = append(args, targetContentID)
+	}
+	rows, err := r.pool.Query(ctx, claimDueQuery(targetContentID != "", localOnly), args...)
+	if err != nil {
+		return nil, fmt.Errorf("claiming metadata image cache jobs: %w", err)
+	}
+	return scanClaimedImageCacheJobs(rows, limit)
+}
+
+// claimDueQuery claims up to $1 due jobs for worker $2, within target scope
+// $3 when targeted.
+func claimDueQuery(targeted, localOnly bool) string {
+	due := "next_attempt_at <= NOW()"
+	if targeted {
+		// A refresh's own discoveries are its to copy now, hold or not.
+		due = "(" + due + " OR " + heldLocalDiscoverySQL + ")"
 	}
 	query := `
 		WITH due AS (
 			SELECT id
 			FROM metadata_image_cache_jobs
 			WHERE status = 'queued'
-			  AND next_attempt_at <= NOW()
+			  AND ` + due + `
 	`
-	args := []any{limit, workerID}
-	if targetContentID != "" {
+	if targeted {
 		query += " AND " + imageCacheTargetScope("$3")
-		args = append(args, targetContentID)
 	}
-	query += `
+	if localOnly {
+		query += " AND " + localImageCacheSourceSQL
+	}
+	return query + `
 			ORDER BY next_attempt_at ASC, id ASC
 			LIMIT $1
 			FOR UPDATE SKIP LOCKED
@@ -572,20 +650,20 @@ func (r *ImageCacheJobRepository) claimDue(ctx context.Context, workerID, target
 			updated_at = NOW()
 		FROM due
 		WHERE j.id = due.id
-		RETURNING
+		RETURNING ` + imageCacheJobReturningColumns
+}
+
+const imageCacheJobReturningColumns = `
 			j.id, j.target_type, j.target_content_id, j.target_language, j.series_id,
 			j.source_path, j.provider_id, j.provider_content_id,
 			j.content_type, j.image_type, j.season_number, j.episode_number,
 			j.status, j.attempt_count, j.next_attempt_at, j.locked_at,
 			j.locked_by, j.last_error, j.created_at, j.updated_at, j.completed_at
 	`
-	rows, err := r.pool.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("claiming metadata image cache jobs: %w", err)
-	}
-	defer rows.Close()
 
-	jobs := make([]*models.MetadataImageCacheJob, 0, limit)
+func scanClaimedImageCacheJobs(rows pgx.Rows, sizeHint int) ([]*models.MetadataImageCacheJob, error) {
+	defer rows.Close()
+	jobs := make([]*models.MetadataImageCacheJob, 0, sizeHint)
 	for rows.Next() {
 		job := new(models.MetadataImageCacheJob)
 		if err := rows.Scan(
@@ -664,7 +742,9 @@ func (r *ImageCacheJobRepository) RequeueClaimed(ctx context.Context, ids []int6
 	_, err := r.pool.Exec(ctx, `
 		UPDATE metadata_image_cache_jobs
 		SET status = 'queued',
-			next_attempt_at = NOW(),
+			-- A job claimed before it was due (a held discovery or a
+			-- deferral) keeps its wait.
+			next_attempt_at = GREATEST(next_attempt_at, NOW()),
 			locked_at = NULL,
 			locked_by = '',
 			updated_at = NOW()
