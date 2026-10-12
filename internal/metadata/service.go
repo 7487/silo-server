@@ -435,6 +435,7 @@ type MetadataService struct {
 	libraryRepo             metadataLibraryRepo
 	folderRepo              metadataFolderRepo
 	itemLocalizationRepo    *catalog.MediaItemLocalizationRepository
+	itemBackdropRepo        metadataItemBackdropRepo
 	itemAliasRepo           *catalog.ItemAliasRepository
 	seasonLocalizationRepo  metadataSeasonLocalizationRepo
 	episodeLocalizationRepo metadataEpisodeLocalizationRepo
@@ -528,6 +529,7 @@ func NewMetadataService(
 	rootClaimRepo *catalog.RootClaimRepository,
 ) *MetadataService {
 	var itemLocalizationRepo *catalog.MediaItemLocalizationRepository
+	var itemBackdropRepo metadataItemBackdropRepo
 	var itemAliasRepo *catalog.ItemAliasRepository
 	var seasonLocalizationRepo metadataSeasonLocalizationRepo
 	var episodeLocalizationRepo metadataEpisodeLocalizationRepo
@@ -547,6 +549,7 @@ func NewMetadataService(
 		enrichmentState = newEnrichmentStateRepository(pool)
 		ratingSourceRepo = catalog.NewRatingSourceRepository(pool)
 		itemLocalizationRepo = catalog.NewMediaItemLocalizationRepository(pool)
+		itemBackdropRepo = catalog.NewItemBackdropRepository(pool)
 		itemAliasRepo = catalog.NewItemAliasRepository(pool)
 		seasonLocalizationRepo = catalog.NewSeasonLocalizationRepository(pool)
 		episodeLocalizationRepo = catalog.NewEpisodeLocalizationRepository(pool)
@@ -567,6 +570,7 @@ func NewMetadataService(
 		libraryRepo:             libraryRepo,
 		folderRepo:              folderRepo,
 		itemLocalizationRepo:    itemLocalizationRepo,
+		itemBackdropRepo:        itemBackdropRepo,
 		itemAliasRepo:           itemAliasRepo,
 		seasonLocalizationRepo:  seasonLocalizationRepo,
 		episodeLocalizationRepo: episodeLocalizationRepo,
@@ -2792,6 +2796,7 @@ func (s *MetadataService) mergeAndPersist(
 	// Build the item for persistence.
 	now := time.Now()
 	item := metadataResultToItem(accumulator, contentType)
+	carryItemOnlyArtwork(item, existingItem)
 	item.DefaultMetadataLanguage = canonicalLanguage
 	item.MatchedAt = &now
 	item.LastRefreshed = &now
@@ -2825,10 +2830,13 @@ func (s *MetadataService) mergeAndPersist(
 		keepStoredArtwork(item, existingItem)
 	}
 
-	// Apply best images.
+	// Apply best images. One retention serves the item level, so a library
+	// folder that does not answer is probed once per refresh.
+	var localArt *localArtworkRetention
 	if handleArtwork {
+		localArt = newLocalArtworkRetention(ctx, contentID, localArtworkItem)
 		applyBestImages(item, images, mergeMode, req.Language)
-		keepUnconfirmedLocalItemArtwork(ctx, item, existingItem)
+		keepUnconfirmedLocalItemArtwork(localArt, item, existingItem)
 		item.PosterThumbhash = mergedImageThumbhash(
 			existingImagePath(existingItem, ImagePoster),
 			existingImageThumbhash(existingItem, ImagePoster),
@@ -2845,6 +2853,7 @@ func (s *MetadataService) mergeAndPersist(
 
 	if handleArtwork {
 		prepareItemImagesForQueue(item, existingItem)
+		dropGoneItemOnlyArtwork(localArt, item, images)
 	}
 
 	if isNew && contentID == "" {
@@ -2881,6 +2890,7 @@ func (s *MetadataService) mergeAndPersist(
 	providerDedupReleased = true
 	if handleArtwork {
 		s.enqueueItemImages(ctx, item, accumulator.ProviderIDs, images)
+		s.syncItemExtraBackdrops(ctx, localArt, item, accumulator.ProviderIDs, images)
 	}
 
 	if !isCanonicalWrite && s.itemLocalizationRepo != nil {
@@ -4967,48 +4977,35 @@ func episodeResultFromModel(episode *models.Episode) EpisodeResult {
 	return result
 }
 
+// existingItemArtworkField finds the stored item's slot for imageType.
+func existingItemArtworkField(item *models.MediaItem, imageType ImageType) (itemArtworkField, bool) {
+	for _, field := range itemArtworkFields(item) {
+		if field.imageType == imageType {
+			return field, true
+		}
+	}
+	return itemArtworkField{}, false
+}
+
 func existingImagePath(item *models.MediaItem, imageType ImageType) string {
-	if item == nil {
-		return ""
+	if field, ok := existingItemArtworkField(item, imageType); ok {
+		return *field.path
 	}
-	switch imageType {
-	case ImagePoster:
-		return item.PosterPath
-	case ImageBackdrop:
-		return item.BackdropPath
-	default:
-		return item.LogoPath
-	}
+	return ""
 }
 
 func existingImageThumbhash(item *models.MediaItem, imageType ImageType) string {
-	if item == nil {
-		return ""
+	if field, ok := existingItemArtworkField(item, imageType); ok && field.thumbhash != nil {
+		return *field.thumbhash
 	}
-	switch imageType {
-	case ImagePoster:
-		return item.PosterThumbhash
-	case ImageBackdrop:
-		return item.BackdropThumbhash
-	default:
-		return ""
-	}
+	return ""
 }
 
 func existingImageSourcePath(item *models.MediaItem, imageType ImageType) string {
-	if item == nil {
-		return ""
+	if field, ok := existingItemArtworkField(item, imageType); ok {
+		return *field.source
 	}
-	switch imageType {
-	case ImagePoster:
-		return item.PosterSourcePath
-	case ImageBackdrop:
-		return item.BackdropSourcePath
-	case ImageLogo:
-		return item.LogoSourcePath
-	default:
-		return ""
-	}
+	return ""
 }
 
 func mergedImageThumbhash(previousPath, previousThumbhash, nextPath, nextThumbhash string) string {
@@ -5348,7 +5345,7 @@ func (s *MetadataService) persistSeasonAndEpisodeRows(
 			// preserveCachedArtwork sees the raw provider path so a local
 			// file:// source still routes into *_source_path here.
 			nextPath, nextThumbhash, nextSourcePath := preserveCachedArtwork(
-				seasonArtwork.providerPath(season.PosterPath, existingSeason.PosterPath, existingSeason.PosterSourcePath),
+				seasonArtwork.providerPath(ImagePoster, season.PosterPath, existingSeason.PosterPath, existingSeason.PosterSourcePath),
 				season.PosterThumbhash,
 				existingSeason.PosterPath,
 				existingSeason.PosterSourcePath,
@@ -5743,7 +5740,7 @@ func (s *MetadataService) persistSeasonAndEpisodeRows(
 				// preserveCachedArtwork sees the raw provider path so a local
 				// file:// source still routes into *_source_path here.
 				nextPath, nextThumbhash, nextSourcePath := preserveCachedArtwork(
-					episodeArtwork.providerPath(ep.StillPath, existingEpisode.StillPath, existingEpisode.StillSourcePath),
+					episodeArtwork.providerPath(ImageStill, ep.StillPath, existingEpisode.StillPath, existingEpisode.StillSourcePath),
 					ep.StillThumbhash,
 					existingEpisode.StillPath,
 					existingEpisode.StillSourcePath,
@@ -8542,6 +8539,12 @@ func applyBestImages(item *models.MediaItem, images []RemoteImage, mode MergeMod
 		// are all language-tagged must not end up with no backdrop at all.
 		ImageBackdrop: selectBest(ImageBackdrop, []func(RemoteImage) bool{languageNeutral, hasLanguage}),
 		ImageLogo:     selectBest(ImageLogo, logoFilters),
+		// Banners, thumbs, clear art and disc art usually carry the title, so
+		// they follow the library language like logos.
+		ImageBanner:   selectBest(ImageBanner, logoFilters),
+		ImageThumb:    selectBest(ImageThumb, logoFilters),
+		ImageClearArt: selectBest(ImageClearArt, logoFilters),
+		ImageDisc:     selectBest(ImageDisc, logoFilters),
 	}
 
 	imagesLocked := artworkLocked(item)
@@ -8571,6 +8574,14 @@ func applyBestImages(item *models.MediaItem, images []RemoteImage, mode MergeMod
 		item.LogoSourcePath = ""
 	} else {
 		applyIfBetter(&item.LogoPath, bestByType[ImageLogo])
+	}
+	for _, field := range itemOnlyArtworkFields(item) {
+		// These slots arrive carried over from the stored item, so under the
+		// lock a source still waiting for its cache job holds the slot too.
+		if imagesLocked && *field.source != "" {
+			continue
+		}
+		applyIfBetter(field.path, bestByType[field.imageType])
 	}
 }
 
@@ -8609,11 +8620,11 @@ func itemArtworkFields(item *models.MediaItem) []itemArtworkField {
 	if item == nil {
 		return nil
 	}
-	return []itemArtworkField{
+	return append([]itemArtworkField{
 		{imageType: ImagePoster, path: &item.PosterPath, source: &item.PosterSourcePath, thumbhash: &item.PosterThumbhash},
 		{imageType: ImageBackdrop, path: &item.BackdropPath, source: &item.BackdropSourcePath, thumbhash: &item.BackdropThumbhash},
 		{imageType: ImageLogo, path: &item.LogoPath, source: &item.LogoSourcePath},
-	}
+	}, itemOnlyArtworkFields(item)...)
 }
 
 // keepStoredArtwork copies every artwork path, source path and thumbhash from
@@ -8641,6 +8652,13 @@ func prepareItemImagesForQueue(item, existing *models.MediaItem) {
 		existingPath := existingImagePath(existing, field.imageType)
 		existingThumbhash := existingImageThumbhash(existing, field.imageType)
 		existingSource := existingImageSourcePath(existing, field.imageType)
+		// A banner, thumb, clear art or disc slot is carried over from the
+		// stored item; one still waiting for its cache job keeps its source
+		// so the queued job still matches it.
+		if isItemOnlyArtworkType(field.imageType) && *field.path == "" && existingPath == "" &&
+			*field.source != "" && *field.source == existingSource {
+			continue
+		}
 		currentThumbhash := ""
 		if field.thumbhash != nil {
 			currentThumbhash = *field.thumbhash
@@ -9167,12 +9185,22 @@ func ImageTypeToString(t ImageType) string {
 		return "still"
 	case ImageProfile:
 		return "profile"
+	case ImageBanner:
+		return ImageCacheImageBanner
+	case ImageThumb:
+		return ImageCacheImageThumb
+	case ImageClearArt:
+		return ImageCacheImageClearArt
+	case ImageDisc:
+		return ImageCacheImageDisc
 	default:
 		return "poster"
 	}
 }
 
-// ImageTypeFromString converts a string to an ImageType.
+// ImageTypeFromString converts a string to an ImageType. It parses only the
+// types the admin image picker can apply; anything else stays a poster, as it
+// always has for that endpoint.
 func ImageTypeFromString(s string) ImageType {
 	switch s {
 	case "backdrop":

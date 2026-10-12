@@ -724,6 +724,29 @@ type MediaItem struct {
 	// because some frozen v1 responses serialize MediaItem directly.
 	PosterIsEpisodeStill   *bool `json:"-"`
 	BackdropIsEpisodeStill *bool `json:"-"`
+	// Banner, thumb (landscape), clear art and disc art follow the poster,
+	// backdrop and logo slots. Clear art and disc art are cut-outs and, like
+	// the logo, carry no thumbhash. json:"-" for the same frozen v1 responses.
+	BannerPath         string `json:"-"`
+	BannerSourcePath   string `json:"-"`
+	BannerThumbhash    string `json:"-"`
+	ThumbPath          string `json:"-"`
+	ThumbSourcePath    string `json:"-"`
+	ThumbThumbhash     string `json:"-"`
+	ClearArtPath       string `json:"-"`
+	ClearArtSourcePath string `json:"-"`
+	DiscPath           string `json:"-"`
+	DiscSourcePath     string `json:"-"`
+}
+
+// ItemBackdrop is one backdrop after an item's primary, a media_item_backdrops
+// row. Ordinal 1 is the second backdrop the item shows.
+type ItemBackdrop struct {
+	ID         int64
+	Ordinal    int
+	Path       string
+	SourcePath string
+	Thumbhash  string
 }
 
 // MediaItemAlias is a provider-confirmed searchable title for a media item.
