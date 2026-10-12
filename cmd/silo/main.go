@@ -2764,6 +2764,9 @@ func main() {
 	// shares one budget per profile even with ratelimit.backend at its memory
 	// default, and is process-local only on a Redis-less deployment.
 	deps.ProfilePINAttempts = ratelimit.NewProfilePINAttemptLimiter(apiRedisClient)
+	// The Quick Connect code budget per account follows the same rule, and
+	// the native approval routes and Jellyfin's Authorize share it.
+	deps.QuickConnectCodeAttempts = ratelimit.NewQuickConnectCodeAttemptLimiter(apiRedisClient)
 
 	// Activity log writer + consumer.
 	if err := activitylog.SeedDefaults(ctx, settingsRepo); err != nil {
@@ -3663,6 +3666,11 @@ func main() {
 			})
 			provider := auth.NewLocalProvider(userRepo, sessionRepo)
 			compatDeps.AuthService = auth.NewService(provider, jwtService, sessionRepo, userRepo, nil, nil, nil)
+			// Jellyfin Quick Connect runs on the device sign-in requests the
+			// native API approves; profile tokens are only for remote playback.
+			if devices := auth.NewDeviceLoginService(deps.DB, userRepo, jwtService, sessionRepo, compatDeps.UserStoreProvider, nil); devices != nil {
+				compatDeps.DeviceLogin = devices.WithQuickConnectAttempts(deps.QuickConnectCodeAttempts)
+			}
 			if authProviderRegistry != nil {
 				// Directory (LDAP) users sign in with their directory password.
 				compatDeps.AuthService.SetPluginProviderSource(authProviderRegistry)
