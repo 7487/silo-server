@@ -162,6 +162,23 @@ relay, and the relay keeps no device state, so a new deployment needs no client
 change. This covers a generation superseded by another holder of the same
 credential (a database cloned to a second server shares it), a signing key the
 relay retired, and a capability that expired past its renewal grace.
+
+Every push the server sends, administrator test pushes included, names the
+deployment (`server_id`, the identity `getServerIdentity` reports) and the push
+device's profile (`profile_id`). The relay forwards them to the device as
+`silo_server_id` and `silo_profile_id`, so a device signed into several servers
+or profiles fetches display data from the one the push belongs to. The two are
+sent together or not at all; without a readable server identity the push goes
+out without them. A relay that predates the fields answers 400
+`unexpected_field`. The sender then resends the attempt once without them under
+the same idempotency key, and leaves them out of later sends to that relay for an
+hour. The fields are part of the relay's idempotency hash, and a retry can
+differ from the attempt's first send (an earlier server version, another
+replica, or the hour ending). The relay answers such a retry with 422
+`idempotency_key_reuse`, and the sender resends it once with the other choice,
+which the relay replays or resumes. When the identity lookup failed, so the
+sender has no other choice to offer, that 422 is retried later instead of
+failing the push.
 Only an administrator's clear or a relay `deployment_disabled` response parks
 delivery behind the re-registration marker; either one stores an empty
 credential. An older server stored the rejected key along with the marker. That
