@@ -745,7 +745,6 @@ function CreateUserForm({
       return next;
     });
   }
-  const [maxProfiles, setMaxProfiles] = useState(5);
   const usernameId = useId();
   const emailId = useId();
   const passwordId = useId();
@@ -753,7 +752,6 @@ function CreateUserForm({
   const roleId = useId();
   const markerEditId = useId();
   const metadataCurationId = useId();
-  const maxProfilesId = useId();
   const accessGroupSelectId = useId();
   const createMutation = useCreateUser();
   // The group picker starts on the default group (undefined until picked),
@@ -822,7 +820,6 @@ function CreateUserForm({
         role,
         permissions,
         create_default_profile: createDefaultProfile,
-        max_profiles: maxProfiles,
         ...policyCreateFields(policy),
         ...(typeof groupToSend === "number" ? { access_group_id: groupToSend } : {}),
       };
@@ -1017,16 +1014,6 @@ function CreateUserForm({
               invalidLimitDrafts={invalidLimitDrafts}
               onInvalidLimitDraftChange={handleInvalidLimitDraftChange}
             />
-            <div className="space-y-1">
-              <Label htmlFor={maxProfilesId}>Max Profiles</Label>
-              <Input
-                id={maxProfilesId}
-                type="number"
-                min={1}
-                value={maxProfiles}
-                onChange={(e) => setMaxProfiles(Number(e.target.value))}
-              />
-            </div>
           </TabsContent>
         </div>
       </Tabs>
