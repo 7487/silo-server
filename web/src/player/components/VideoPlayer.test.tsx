@@ -79,6 +79,27 @@ vi.mock("../hooks/usePlaybackRealtime", () => ({
 vi.mock("../hooks/useWatchProgress", () => ({
   useWatchProgress: () => vi.fn().mockResolvedValue(undefined),
 }));
+// Opted into per test: plans whose original the browser engine plays.
+const engineRoute = vi.hoisted(() => ({ chosen: false, refused: false }));
+vi.mock("../engine/routing", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../engine/routing")>();
+  return {
+    ...actual,
+    resolveOriginalPlaybackRoute: (
+      ...args: Parameters<typeof actual.resolveOriginalPlaybackRoute>
+    ) =>
+      engineRoute.refused
+        ? {
+            kind: "unsupported",
+            failure: { classification: actual.ENGINE_UNSUPPORTED_SOURCE, message: "refused" },
+          }
+        : engineRoute.chosen
+          ? { kind: "engine", source: {} }
+          : actual.resolveOriginalPlaybackRoute(...args),
+  };
+});
+const attachBrowserEngine = vi.hoisted(() => vi.fn(() => ({ destroy: vi.fn() })));
+vi.mock("../engine", () => ({ attachBrowserEngine }));
 vi.mock("../hooks/useKeyboardShortcuts", () => ({ useKeyboardShortcuts: vi.fn() }));
 vi.mock("../hooks/useRemuxSeeking", () => ({
   useRemuxSeeking: () => ({ handleSeek: playerSeek }),
@@ -3035,6 +3056,99 @@ describe("VideoPlayer source timeline", () => {
       controls.current!.onSeek(1400);
     });
     expect(playerSeek).toHaveBeenCalledWith(expect.closeTo(1400 + origin));
+  });
+
+  // The engine starts its clock at the file's first frame itself, so the
+  // origin a native load measured must not carry into an engine session, and
+  // a native load after the engine measures its own again.
+  it("drops a native clock origin while the browser engine plays the original", async () => {
+    const engine = {
+      containers: ["mkv"],
+      videoCodecs: ["h264"],
+      audioCodecs: ["aac"],
+      hdr: false,
+    };
+    const { container, rerenderPlayer } = renderPlayer();
+    const video = container.querySelector("video");
+    if (!video) throw new Error("expected video element");
+    await waitFor(() => expect(video.src).toContain("/api/v1/stream/session-1"));
+    video.currentTime = 29.977;
+    fireEvent.loadedMetadata(video);
+    await waitFor(() => expect(subtitleTimeline.textOffsetSeconds).toBeCloseTo(-29.977));
+
+    engineRoute.chosen = true;
+    try {
+      rerenderPlayer({ planRevision: 2, browserEngine: engine });
+      await waitFor(() => expect(attachBrowserEngine).toHaveBeenCalled());
+      await waitFor(() => expect(subtitleTimeline.textOffsetSeconds).toBe(0));
+      expect(subtitleTimeline.assOffsetSeconds).toBe(0);
+    } finally {
+      engineRoute.chosen = false;
+    }
+
+    rerenderPlayer({ planRevision: 3, browserEngine: null });
+    await waitFor(() => expect(video.src).toContain("/api/v1/stream/session-1"));
+    video.currentTime = 1.4;
+    fireEvent.loadedMetadata(video);
+    await waitFor(() => expect(subtitleTimeline.textOffsetSeconds).toBeCloseTo(-1.4));
+  });
+
+  // A route refused before any media event has no position of its own yet;
+  // recovery must resume where this plan was starting, not at 0.
+  it("reports the resume point when the engine refuses a resumed original", async () => {
+    const onPlanFailure = vi.fn();
+    const plan = fixturePlanV3({
+      ...directPlan,
+      timeline: { ...directPlan.timeline, player_start_seconds: 1300, timeline_offset_seconds: 0 },
+    });
+    engineRoute.refused = true;
+    try {
+      renderPlayer({
+        plan,
+        initialPosition: 1300,
+        onPlanFailure,
+        browserEngine: {
+          containers: ["mkv"],
+          videoCodecs: ["h264"],
+          audioCodecs: ["aac"],
+          hdr: false,
+        },
+      });
+      await waitFor(() => expect(onPlanFailure).toHaveBeenCalled());
+      expect(onPlanFailure).toHaveBeenCalledWith(
+        expect.objectContaining({ classification: "browser_engine_unsupported_source" }),
+        1300,
+      );
+    } finally {
+      engineRoute.refused = false;
+    }
+  });
+
+  // The engine's audio follows playbackRate without keeping pitch, so it plays
+  // at 1x and the speed control is hidden, as in a Watch Party.
+  it("plays the browser engine at 1x and hides the speed control", async () => {
+    const engine = {
+      containers: ["mkv"],
+      videoCodecs: ["h264"],
+      audioCodecs: ["aac"],
+      hdr: false,
+    };
+    const { container, rerenderPlayer } = renderPlayer();
+    const video = container.querySelector("video");
+    if (!video) throw new Error("expected video element");
+    await waitFor(() => expect(video.src).toContain("/api/v1/stream/session-1"));
+    act(() => controls.current!.onPlaybackSpeedChange!(1.5));
+    expect(video.playbackRate).toBe(1.5);
+
+    engineRoute.chosen = true;
+    try {
+      rerenderPlayer({ planRevision: 2, browserEngine: engine });
+      await waitFor(() => expect(attachBrowserEngine).toHaveBeenCalled());
+      await waitFor(() => expect(controls.current!.onPlaybackSpeedChange).toBeUndefined());
+      expect(video.playbackRate).toBe(1);
+    } finally {
+      engineRoute.chosen = false;
+    }
   });
 
   // Written to the element before metadata, a seek would become the default
