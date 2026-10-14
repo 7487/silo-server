@@ -20316,6 +20316,8 @@ export interface components {
       last_air_date?: string;
       /** @description Presigned, short-lived */
       logo_url?: string;
+      /** @description Localized fields whose text was machine-translated by AI rather than supplied by a metadata provider or a person; absent when none were. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards. A card shows no tagline, so a card's overview label depends on overview alone. */
+      machine_translated_fields?: ("overview" | "tagline")[];
       /** Format: int64 */
       manga_chapter_count?: number;
       /** Format: int64 */
@@ -20326,6 +20328,8 @@ export interface components {
       /** @description Technical badges of the best file */
       overlay_summary?: components["schemas"]["CatalogItemOverlay"];
       overview?: string;
+      /** @description The language this profile reads here when the descriptions this item's page shows are not available in it yet. That is the profile's metadata language after its per-language exceptions, or, when it sets none, the library's for a library's rows or a detail opened in that library. It is pending for the item's own overview, or for a season its overview or any of its episodes' overviews. Echo it to translateCatalogItemDescription to translate on view. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards; other listings never carry it, so its absence there says nothing about the language. */
+      pending_translation_language?: string;
       /** @description The item to play when the card is a series or season; absent when the item plays itself */
       play_content_id?: string;
       /**
@@ -20500,7 +20504,7 @@ export interface components {
       locked_fields?: number[];
       /** @description Presigned, short-lived */
       logo_url?: string;
-      /** @description Localized fields whose text was machine-translated by AI rather than supplied by a metadata provider or a person; absent when none were */
+      /** @description Localized fields whose text was machine-translated by AI rather than supplied by a metadata provider or a person; absent when none were. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards. A card shows no tagline, so a card's overview label depends on overview alone. */
       machine_translated_fields?: ("overview" | "tagline")[];
       manga?: components["schemas"]["MangaDetailExtension"];
       /** Format: int64 */
@@ -20514,7 +20518,7 @@ export interface components {
       /** @description Technical badges of the best file */
       overlay_summary?: components["schemas"]["CatalogItemOverlay"];
       overview?: string;
-      /** @description This profile's metadata language when the page's descriptions are not available in it yet: the item's own overview, or for a season its overview or any of its episodes' overviews. Echo it to translateCatalogItemDescription. */
+      /** @description The language this profile reads here when the descriptions this item's page shows are not available in it yet. That is the profile's metadata language after its per-language exceptions, or, when it sets none, the library's for a library's rows or a detail opened in that library. It is pending for the item's own overview, or for a season its overview or any of its episodes' overviews. Echo it to translateCatalogItemDescription to translate on view. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards; other listings never carry it, so its absence there says nothing about the language. */
       pending_translation_language?: string;
       /** @description The item to play when the card is a series or season; absent when the item plays itself */
       play_content_id?: string;
@@ -23151,7 +23155,7 @@ export interface components {
       machine_translated_fields?: "overview"[];
       overlay_summary?: components["schemas"]["CatalogItemOverlay"];
       overview?: string;
-      /** @description This profile's metadata language when the episode's description is not available in it yet; translating the episode's season fills it */
+      /** @description The language this profile reads here (its metadata language, or the library's when it sets none) when the episode's description is not available in it yet; translating the episode's season fills it */
       pending_translation_language?: string;
       /** @description The episode's IMDb and TMDB ratings, in the shape a title page's ratings use. Absent when the episode has no rating. */
       ratings?: components["schemas"]["CatalogRating"][];
@@ -23513,6 +23517,8 @@ export interface components {
       last_air_date?: string;
       /** @description Presigned, short-lived */
       logo_url?: string;
+      /** @description Localized fields whose text was machine-translated by AI rather than supplied by a metadata provider or a person; absent when none were. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards. A card shows no tagline, so a card's overview label depends on overview alone. */
+      machine_translated_fields?: ("overview" | "tagline")[];
       /** Format: int64 */
       manga_chapter_count?: number;
       /** Format: int64 */
@@ -23523,6 +23529,8 @@ export interface components {
       /** @description Technical badges of the best file */
       overlay_summary?: components["schemas"]["CatalogItemOverlay"];
       overview?: string;
+      /** @description The language this profile reads here when the descriptions this item's page shows are not available in it yet. That is the profile's metadata language after its per-language exceptions, or, when it sets none, the library's for a library's rows or a detail opened in that library. It is pending for the item's own overview, or for a season its overview or any of its episodes' overviews. Echo it to translateCatalogItemDescription to translate on view. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards; other listings never carry it, so its absence there says nothing about the language. */
+      pending_translation_language?: string;
       /** @description The item to play when the card is a series or season; absent when the item plays itself */
       play_content_id?: string;
       /**
@@ -31946,6 +31954,8 @@ export interface components {
       last_air_date?: string;
       /** @description Presigned, short-lived */
       logo_url?: string;
+      /** @description Localized fields whose text was machine-translated by AI rather than supplied by a metadata provider or a person; absent when none were. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards. A card shows no tagline, so a card's overview label depends on overview alone. */
+      machine_translated_fields?: ("overview" | "tagline")[];
       /** Format: int64 */
       manga_chapter_count?: number;
       /** Format: int64 */
@@ -31956,6 +31966,8 @@ export interface components {
       /** @description Technical badges of the best file */
       overlay_summary?: components["schemas"]["CatalogItemOverlay"];
       overview?: string;
+      /** @description The language this profile reads here when the descriptions this item's page shows are not available in it yet. That is the profile's metadata language after its per-language exceptions, or, when it sets none, the library's for a library's rows or a detail opened in that library. It is pending for the item's own overview, or for a season its overview or any of its episodes' overviews. Echo it to translateCatalogItemDescription to translate on view. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards; other listings never carry it, so its absence there says nothing about the language. */
+      pending_translation_language?: string;
       /** @description The item to play when the card is a series or season; absent when the item plays itself */
       play_content_id?: string;
       /**
@@ -32113,6 +32125,8 @@ export interface components {
       last_air_date?: string;
       /** @description Presigned, short-lived */
       logo_url?: string;
+      /** @description Localized fields whose text was machine-translated by AI rather than supplied by a metadata provider or a person; absent when none were. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards. A card shows no tagline, so a card's overview label depends on overview alone. */
+      machine_translated_fields?: ("overview" | "tagline")[];
       /** Format: int64 */
       manga_chapter_count?: number;
       /** Format: int64 */
@@ -32123,6 +32137,8 @@ export interface components {
       /** @description Technical badges of the best file */
       overlay_summary?: components["schemas"]["CatalogItemOverlay"];
       overview?: string;
+      /** @description The language this profile reads here when the descriptions this item's page shows are not available in it yet. That is the profile's metadata language after its per-language exceptions, or, when it sets none, the library's for a library's rows or a detail opened in that library. It is pending for the item's own overview, or for a season its overview or any of its episodes' overviews. Echo it to translateCatalogItemDescription to translate on view. Set only on item details, the cards built from them (shuffles, the Watch Together picker), and Home and library section cards; other listings never carry it, so its absence there says nothing about the language. */
+      pending_translation_language?: string;
       /** @description The item to play when the card is a series or season; absent when the item plays itself */
       play_content_id?: string;
       /**
