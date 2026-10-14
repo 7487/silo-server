@@ -20,6 +20,7 @@ import {
 import { planNextHomeSectionBatch } from "./homeSectionQueue";
 import { buildHomeSectionViewModel, type HomeSectionSlot } from "./homeSectionState";
 import { collectCachedHomeSections } from "./homeSectionCache";
+import { useDedupedSections } from "./sectionDedupe";
 import { useSectionRefreshSignal } from "./homeSurfaceRefresh";
 import { useUICustomization } from "@/hooks/useUICustomization";
 import { carouselIntrinsicHeight } from "@/lib/uiCustomization";
@@ -216,9 +217,11 @@ export default function Home() {
     if (hasFirstContent) markCriticalContentLoaded();
   }, [hasFirstContent]);
 
+  const visibleSections = useDedupedSections(layout, loadedSections);
+
   const viewModel = buildHomeSectionViewModel({
     layout,
-    loadedSections,
+    loadedSections: visibleSections,
     failedIds,
   });
 
