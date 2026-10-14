@@ -1,6 +1,6 @@
 import { useMediaSkipHandlers } from "../hooks/useMediaSkipHandlers";
 import { skipTarget } from "../utils/skipTarget";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ParsedCue } from "../utils/parseVTT";
 import { resolveSubtitleAutoSelect } from "../utils/subtitleSort";
 import type HlsType from "hls.js";
@@ -478,8 +478,12 @@ export function VideoPlayer({
   const appliedRoomCommandIdRef = useRef<string | null>(null);
   const roomCommandTimerRef = useRef<number | null>(null);
   // The advancing room position a playbackRate catch-up is converging toward,
-  // when one is active. Non-null means playbackRate is intentionally not 1.
+  // when one is active. Non-null means playbackRate is intentionally off the
+  // base rate.
   const roomCatchupTargetRef = useRef<RoomCatchupTarget | null>(null);
+  // The rate playback returns to when no room catch-up is active: the
+  // viewer's chosen speed, or 1x while a Watch Party room owns the rate.
+  const baseRateRef = useRef(1);
   // Bounds media reloads that room corrections trigger; see roomSyncCatchup.ts.
   const roomReloadBudgetRef = useRef(createRoomReloadBudget());
   // Sustained stalls reported to the room, for offering a lower quality.
@@ -842,6 +846,10 @@ export function VideoPlayer({
     onSustainedStall: noteRoomStall,
   });
   const roomPlaybackActive = !!watchTogetherRoomId && !watchTogether.closedReason;
+  // The viewer's speed for this player session. A room plays everyone at 1x
+  // and nudges the rate itself to keep viewers together.
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const baseRate = roomPlaybackActive ? 1 : playbackSpeed;
   const roomSyncWaiting = watchTogether.room?.playback_state === "waiting";
   // Media events acknowledge readiness while the room waits and while this
   // viewer recovers from a stall the room did not wait for.
@@ -1140,14 +1148,26 @@ export function VideoPlayer({
   }, []);
 
   // Ends an active room catch-up nudge; any seek or local stop returns the
-  // element to 1x so a stale rate never survives a context change.
+  // element to the base rate so a stale rate never survives a context change.
   const resetRoomCatchupRate = useCallback(() => {
     roomCatchupTargetRef.current = null;
     const video = videoRef.current;
-    if (video && video.playbackRate !== 1) {
-      video.playbackRate = 1;
+    if (video && video.playbackRate !== baseRateRef.current) {
+      video.playbackRate = baseRateRef.current;
     }
   }, []);
+
+  // Runs before this commit's other effects, so a catch-up reset in them
+  // already returns to the committed rate. defaultPlaybackRate carries the
+  // speed across media reloads (quality switches, stream rebuilds), which
+  // reset playbackRate to it.
+  useLayoutEffect(() => {
+    baseRateRef.current = baseRate;
+    const video = videoRef.current;
+    if (!video) return;
+    video.defaultPlaybackRate = baseRate;
+    if (roomCatchupTargetRef.current === null) video.playbackRate = baseRate;
+  }, [baseRate]);
 
   // Asks the server for a stream anchored at `seconds`. The replan decides
   // whether that took: a refused or failed replan leaves playback where it
@@ -2488,11 +2508,11 @@ export function VideoPlayer({
         setPendingSeekTime(resolved.pendingSeekTime);
       }
       // A rate-based room catch-up that reached the advancing room position
-      // returns to 1x.
+      // returns to the base rate.
       const catchupTarget = roomCatchupTargetRef.current;
       if (catchupTarget !== null && roomCatchupConverged(catchupTarget, nextTime, Date.now())) {
         roomCatchupTargetRef.current = null;
-        video.playbackRate = 1;
+        video.playbackRate = baseRateRef.current;
         settleRoomReloads(roomReloadBudgetRef.current);
       }
       // A correction's reloaded media is playing. How long it took to load
@@ -4368,6 +4388,8 @@ export function VideoPlayer({
               ? (fileId) => onSwitchVersion(fileId, currentTime)
               : undefined
           }
+          playbackSpeed={playbackSpeed}
+          onPlaybackSpeedChange={roomPlaybackActive ? undefined : setPlaybackSpeed}
           onTogglePiP={handleTogglePiP}
           onPlayPause={handlePlayPause}
           onSeek={handlePlayerSeek}
