@@ -345,6 +345,7 @@ func DeleteProfile(db *sql.DB, id string) error {
 	cascadeTables := []string{
 		"favorites",
 		"watchlist",
+		"not_interested",
 		"watch_progress",
 		"watch_history",
 		"hidden_history_items",

@@ -350,6 +350,9 @@ func (f *Fetcher) FetchOne(ctx context.Context, resolved ResolvedSection, librar
 		} else {
 			items, total, title, err = f.fetchGenreRouletteWithTitle(ctx, resolved, libraryID, libraryIDs, filter)
 		}
+		if err == nil {
+			items, total = f.withoutNotInterested(ctx, resolved, userID, profileID, items, total)
+		}
 		if err != nil {
 			return SectionWithItems{}, err
 		}
@@ -383,6 +386,10 @@ func (f *Fetcher) FetchOne(ctx context.Context, resolved ResolvedSection, librar
 		})
 	} else {
 		items, total, err = f.fetchSection(ctx, resolved, libraryID, libraryIDs, userID, profileID, filter)
+	}
+	if err == nil && HidesNotInterested(resolved.SectionType) {
+		// Marks are per profile, so they leave the row after the shared cache.
+		items, total = f.withoutNotInterested(ctx, resolved, userID, profileID, items, total)
 	}
 	if err != nil {
 		return SectionWithItems{}, err
