@@ -91,6 +91,9 @@ type Service struct {
 	launchGroup      singleflight.Group
 	runtimeRefreshMu sync.RWMutex
 	resident         *ResidentSupervisor
+	// lazyStartFailures records failed launches of non-resident plugins for
+	// the admin runtime state; see RuntimeState.
+	lazyStartFailures lazyStartFailures
 	// lifecycleBus, when set by PublishLifecycleChanges, carries every
 	// lifecycle change to the proxy nodes running the same installations.
 	lifecycleBus cache.EventBus
@@ -540,12 +543,37 @@ func (s *Service) Start(ctx context.Context, installationID int) (pluginClient, 
 	return s.start(ctx, installationID, true)
 }
 
-func (s *Service) start(ctx context.Context, installationID int, allowResident bool) (pluginClient, error) {
-	installation, manifest, err := s.ensureInstallationCache(ctx, installationID, true)
+func (s *Service) start(ctx context.Context, installationID int, allowResident bool) (client pluginClient, err error) {
+	installation, err := s.loadInstallation(ctx, installationID, true)
 	if err != nil {
+		// No launch was attempted: a disabled, missing or unreadable row says
+		// nothing about whether the plugin can start.
+		return nil, err
+	}
+	// Record why a lazy launch failed, including an archive or config that
+	// cannot be loaded, so the admin API can show a plugin that cannot start.
+	// The failure is tied to the snapshot that was tried, not re-read, so an
+	// update that lands mid-launch is not marked failed. The supervisor
+	// reports failures of the resident plugins it launches itself; a refused
+	// resident says nothing about the plugin.
+	var manifest *pluginv1.PluginManifest
+	refusedResident := false
+	defer func() {
+		supervised := allowResident && (manifest == nil || isResidentManifest(manifest))
+		switch {
+		case err == nil:
+			s.lazyStartFailures.clear(installationID)
+		case !supervised && !refusedResident:
+			s.lazyStartFailures.record(installation, err)
+		}
+	}()
+	manifest, err = s.ensureLoadedInstallation(ctx, installation)
+	if err != nil {
+		manifest = nil
 		return nil, err
 	}
 	if !allowResident && isResidentManifest(manifest) {
+		refusedResident = true
 		return nil, fmt.Errorf("%w: resident plugin installation %d requires supervision", pluginhost.ErrPluginUnhealthy, installationID)
 	}
 	configEntries, err := s.globalConfigEntries(ctx, installation.ID)
