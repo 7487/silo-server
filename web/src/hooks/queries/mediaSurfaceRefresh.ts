@@ -39,6 +39,10 @@ interface InvalidateMediaSurfaceOptions {
    */
   skipItemQueries?: boolean;
   skipSimilarItems?: boolean;
+  // Items already found related to itemId, such as through a watch detail
+  // dropped since (dropInactiveWatchDetail), which was the only link from an
+  // episode to its series.
+  knownRelatedIds?: ReadonlySet<string>;
   // The item may be one this client has never seen, such as an episode a
   // scan just added. Only catalog events can say so; progress, favorite and
   // watchlist events are about items that already exist.
@@ -97,6 +101,23 @@ export function cancelItemDetailQueries(queryClient: QueryClient, itemId: string
   return queryClient.cancelQueries({
     predicate: (query) => isItemDetailQueryKey(query.queryKey, itemId),
   });
+}
+
+// dropInactiveWatchDetail drops a closed player's cached watch detail for an
+// item whose resume position changed, at once: the player starts from that
+// detail's position while it refetches. The detail may be the only link from
+// an episode to its series, so the items it led to are returned for the
+// media surface refresh (knownRelatedIds). An open player's query is active
+// and keeps its data. Undefined when there was nothing to drop.
+export function dropInactiveWatchDetail(
+  queryClient: QueryClient,
+  itemId: string,
+): ReadonlySet<string> | undefined {
+  const filters = { queryKey: [...itemKeys.all, "watchDetail", itemId], type: "inactive" } as const;
+  if (queryClient.getQueryCache().findAll(filters).length === 0) return undefined;
+  const related = relatedItemIds(queryClient, itemId);
+  queryClient.removeQueries(filters);
+  return related;
 }
 
 export function removeItemFromHomeSectionCaches(
@@ -416,6 +437,7 @@ export async function invalidateMediaSurfaceQueries(
   // that predates the mutation satisfy the invalidation and land in the cache
   // as fresh.
   const relatedIds = options.itemId ? relatedItemIds(queryClient, options.itemId) : undefined;
+  options.knownRelatedIds?.forEach((id) => relatedIds?.add(id));
   // A new item nothing in the cache knows about, such as an episode a scan
   // just added, can't be traced to the season or series lists that should now
   // show it, so its event refreshes every such list. Other items' detail
@@ -554,6 +576,13 @@ export function scheduleMediaSurfaceInvalidation(
     skipSimilarItems: existing
       ? Boolean(existing.options.skipSimilarItems && options.skipSimilarItems)
       : options.skipSimilarItems,
+    knownRelatedIds:
+      existing?.options.knownRelatedIds || options.knownRelatedIds
+        ? new Set([
+            ...(existing?.options.knownRelatedIds ?? []),
+            ...(options.knownRelatedIds ?? []),
+          ])
+        : undefined,
     watchedKeys: [...(existing?.options.watchedKeys ?? []), ...(options.watchedKeys ?? [])],
   };
   const now = Date.now();
