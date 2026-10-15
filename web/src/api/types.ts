@@ -5363,6 +5363,8 @@ export interface UnmatchedLibraryItem {
   library_id: number;
   library_name: string;
   status: string;
+  /** When an admin marked the item as intentionally unmatched; absent unless ignored. */
+  ignored_at?: string;
 }
 
 export interface FilesystemBrowseEntry {
