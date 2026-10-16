@@ -99,6 +99,27 @@ release event's episode key:
   for the daily interest rebuild. A release fanned out in that window is
   judged on the stale interest. Evaluating Home removals at fanout time would
   close the gap.
+- A series the profile muted is a hard gate too. `ListActiveBySeries`, the
+  query that loads a release's candidate recipients, anti-joins
+  `profile_series_notification_mutes`, so a muting profile is never a
+  candidate: no delivery row is created and no channel sees the event. The
+  check costs one index probe per candidate inside that query, and it runs
+  again when fanout re-reads the candidates under the inbox locks. A mute
+  committed after that second read is like a preference change made just
+  after the delivery. Muting writes no interest row: the mute lives in its own
+  table keyed by account, profile, and series, because interest rows are
+  recomputed per library and pruned once their reasons go, and a mute lasts
+  until the profile unmutes. The account is part of the key because profile
+  IDs, such as the legacy `default`, repeat across accounts. A muted
+  profile's notification cursor does not move. The mute is read when fanout
+  evaluates a release, not when the episode arrives: unmuting does not
+  announce episodes fanout already evaluated during the mute, since their
+  release events are processed, but an event still inside the settle delay at
+  unmute is fanned out to the profile. No suppression state is kept per
+  release; the window is the settle delay plus one claim pass, and it applies
+  symmetrically to a mute made just after a release. A mute follows its series through a
+  catalog merge or split like other per-profile series state, and profile
+  deletion removes it.
 - Profile-level notification preferences are a hard gate: a reason disabled
   in preferences can never match, so no delivery row is created and no
   channel — including webhooks — ever sees the event. Per-webhook reason
@@ -126,9 +147,10 @@ dual-quality library setups notify at most once. Reprocessing an event is
 idempotent.
 
 The notified-series list (`GET /api/v2/notifications/series`) shows a profile
-the same index fanout evaluates. `ActiveReasons` is the event-independent half
-of these rules, shared by fanout and the list, so the two cannot disagree about
-which reasons a preference silences. The list filters series through the
+the same index fanout evaluates, plus the series it muted. `ActiveReasons` is
+the event-independent half of these rules, shared by fanout and the list, so
+the two cannot disagree about which reasons a preference silences; a muted
+series keeps its active reasons on the list but does not notify. The list filters series through the
 catalog's card access check rather than fanout's per-library one, and it leaves
 out the per-episode checks (Next Up's expected episode and the
 already-notified cursor), which depend on the episode that arrives.
