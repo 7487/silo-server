@@ -318,7 +318,7 @@ func (w *FanoutWorker) fanOutEvent(ctx context.Context, tx pgx.Tx, event Release
 		return nil, 0, err
 	}
 
-	pending := make(map[string]pendingDelivery, len(candidates))
+	pending := make(map[profileKey]pendingDelivery, len(candidates))
 	toInsert := make([]Delivery, 0, len(candidates))
 	for _, candidate := range candidates {
 		flags, eligible := EvaluateRecipient(candidate, prefs[candidate.ProfileID], event.EpisodeKey)
@@ -344,7 +344,7 @@ func (w *FanoutWorker) fanOutEvent(ctx context.Context, tx pgx.Tx, event Release
 			Type:           DeliveryTypeEpisodeAvailable,
 			ReasonFlags:    flagsJSON,
 		}
-		pending[candidate.ProfileID] = pendingDelivery{delivery: delivery, flags: flags}
+		pending[profileKey{candidate.UserID, candidate.ProfileID}] = pendingDelivery{delivery: delivery, flags: flags}
 		toInsert = append(toInsert, delivery)
 	}
 	if len(toInsert) == 0 {
@@ -382,7 +382,7 @@ func (w *FanoutWorker) fanOutEvent(ctx context.Context, tx pgx.Tx, event Release
 	}
 	dispatchRows := make([]DeliveryRow, 0, len(inserted))
 	for _, row := range inserted {
-		entry, ok := pending[row.ProfileID]
+		entry, ok := pending[profileKey{row.UserID, row.ProfileID}]
 		if !ok {
 			continue
 		}
@@ -412,6 +412,23 @@ type pendingDelivery struct {
 	flags    ReasonFlags
 }
 
+// insertedProfileKeys lists the distinct account/profile pairs of the
+// inserted deliveries. Channel targets are looked up by both: profile IDs
+// repeat across accounts, and one account's delivery must not reach another
+// account's devices or webhooks.
+func insertedProfileKeys(inserted []InsertedDelivery) []profileKey {
+	seen := make(map[profileKey]struct{}, len(inserted))
+	keys := make([]profileKey, 0, len(inserted))
+	for _, row := range inserted {
+		key := profileKey{row.UserID, row.ProfileID}
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
 // enqueuePushOutbox inserts pending push attempt rows for each newly inserted
 // delivery and enabled private-push device on every admin-enabled platform
 // (Apple and Android).
@@ -423,21 +440,13 @@ func (w *FanoutWorker) enqueuePushOutbox(ctx context.Context, tx pgx.Tx, inserte
 	if len(platforms) == 0 {
 		return nil
 	}
-	profileSet := make(map[string]struct{}, len(inserted))
-	profileIDs := make([]string, 0, len(inserted))
-	for _, row := range inserted {
-		if _, ok := profileSet[row.ProfileID]; !ok {
-			profileSet[row.ProfileID] = struct{}{}
-			profileIDs = append(profileIDs, row.ProfileID)
-		}
-	}
-	devicesByProfile, err := w.pushDevices.ListEnabledPushByProfiles(ctx, tx, profileIDs, platforms)
+	devicesByProfile, err := w.pushDevices.ListEnabledPushByProfiles(ctx, tx, insertedProfileKeys(inserted), platforms)
 	if err != nil {
 		return err
 	}
 	attempts := make([]PushDeliveryAttempt, 0, len(inserted))
 	for _, row := range inserted {
-		attempts = append(attempts, newPushDeliveryAttempts(row.ID, devicesByProfile[row.ProfileID])...)
+		attempts = append(attempts, newPushDeliveryAttempts(row.ID, devicesByProfile[profileKey{row.UserID, row.ProfileID}])...)
 	}
 	return w.pushDevices.EnqueuePushAttempts(ctx, tx, attempts)
 }
@@ -450,21 +459,13 @@ func (w *FanoutWorker) enqueueWebPushOutbox(ctx context.Context, tx pgx.Tx, inse
 	if w.webPush == nil || len(inserted) == 0 || !w.settings.WebPushEnabled(ctx) {
 		return nil
 	}
-	profileSet := make(map[string]struct{}, len(inserted))
-	profileIDs := make([]string, 0, len(inserted))
-	for _, row := range inserted {
-		if _, ok := profileSet[row.ProfileID]; !ok {
-			profileSet[row.ProfileID] = struct{}{}
-			profileIDs = append(profileIDs, row.ProfileID)
-		}
-	}
-	subsByProfile, err := w.webPush.ListEnabledByProfiles(ctx, tx, profileIDs)
+	subsByProfile, err := w.webPush.ListEnabledByProfiles(ctx, tx, insertedProfileKeys(inserted))
 	if err != nil {
 		return err
 	}
 	attempts := make([]DeliveryAttempt, 0, len(inserted))
 	for _, row := range inserted {
-		for _, sub := range subsByProfile[row.ProfileID] {
+		for _, sub := range subsByProfile[profileKey{row.UserID, row.ProfileID}] {
 			attempts = append(attempts, DeliveryAttempt{
 				ID:                     ulid.Make().String(),
 				NotificationDeliveryID: row.ID,
@@ -479,19 +480,11 @@ func (w *FanoutWorker) enqueueWebPushOutbox(ctx context.Context, tx pgx.Tx, inse
 // inserted delivery, inside the fanout transaction. Two filters apply:
 // per-webhook reason flags, and the per-profile delivery rate limit
 // (over-limit notifications stay in the inbox; webhooks just don't fire).
-func (w *FanoutWorker) enqueueWebhookOutbox(ctx context.Context, tx pgx.Tx, inserted []InsertedDelivery, pending map[string]pendingDelivery) error {
+func (w *FanoutWorker) enqueueWebhookOutbox(ctx context.Context, tx pgx.Tx, inserted []InsertedDelivery, pending map[profileKey]pendingDelivery) error {
 	if w.webhooks == nil || len(inserted) == 0 || !w.settings.WebhooksEnabled(ctx) {
 		return nil
 	}
-	profileSet := make(map[string]struct{}, len(inserted))
-	profileIDs := make([]string, 0, len(inserted))
-	for _, row := range inserted {
-		if _, ok := profileSet[row.ProfileID]; !ok {
-			profileSet[row.ProfileID] = struct{}{}
-			profileIDs = append(profileIDs, row.ProfileID)
-		}
-	}
-	hooksByProfile, err := w.webhooks.ListEnabledByProfiles(ctx, tx, profileIDs)
+	hooksByProfile, err := w.webhooks.ListEnabledByProfiles(ctx, tx, insertedProfileKeys(inserted))
 	if err != nil {
 		return err
 	}
@@ -500,15 +493,16 @@ func (w *FanoutWorker) enqueueWebhookOutbox(ctx context.Context, tx pgx.Tx, inse
 	attempts := make([]DeliveryAttempt, 0, len(inserted))
 	rateLimited := 0
 	for _, row := range inserted {
-		entry, ok := pending[row.ProfileID]
+		key := profileKey{row.UserID, row.ProfileID}
+		entry, ok := pending[key]
 		if !ok {
 			continue
 		}
-		for _, hook := range hooksByProfile[row.ProfileID] {
+		for _, hook := range hooksByProfile[key] {
 			if !hook.MatchesReasons(entry.flags) {
 				continue
 			}
-			if w.rateLimiter != nil && !w.rateLimiter.Allow(row.ProfileID, rateLimit) {
+			if w.rateLimiter != nil && !w.rateLimiter.Allow(key, rateLimit) {
 				rateLimited++
 				continue
 			}
