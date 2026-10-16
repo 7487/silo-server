@@ -173,14 +173,13 @@ function SeriesToolbar({ series }: { series: ReturnType<typeof useSeriesOptions>
   const setQ = series.setQ;
   useEffect(() => {
     if (debounced !== series.q) setQ(debounced);
-    // Only a settled edit writes the URL; series.q follows from it.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only a settled edit writes the URL; series.q follows from it
   }, [debounced]);
   useEffect(() => {
     // The URL changed from elsewhere (the Series button resets it); our own
     // writes match the settled text and leave typing in progress alone.
     if (series.q !== debounced) setText(series.q);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs on URL changes only, not on each keystroke
   }, [series.q]);
   return (
     <div className="mb-3 flex flex-col gap-2 px-3 sm:flex-row sm:items-center">
