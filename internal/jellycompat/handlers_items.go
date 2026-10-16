@@ -2300,6 +2300,7 @@ func (h *ItemsHandler) HandleNextUp(w http.ResponseWriter, r *http.Request) {
 	q := catalog.NextUpQuery{
 		UserID:          session.StreamAppUserID,
 		ProfileID:       session.ProfileID,
+		AccessFilter:    h.resolveAccessFilter(r.Context(), session),
 		Limit:           query.limit + query.startIndex, // fetch enough to paginate
 		EnableResumable: parseBool(qp.Get("enableResumable"), false),
 	}
@@ -2321,6 +2322,8 @@ func (h *ItemsHandler) HandleNextUp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	q.RankByRelease = h.nextUpNewReleasesFirst(r.Context(), session)
+
 	results, err := h.nextUpRepo.ListNextUp(r.Context(), q)
 	if err != nil {
 		writeCompatUpstreamError(w, err)
@@ -2328,6 +2331,20 @@ func (h *ItemsHandler) HandleNextUp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeNextUpResponse(w, r, session, results, query)
+}
+
+// nextUpNewReleasesFirst reads the profile's ui.next_up_new_releases_first,
+// so Jellyfin clients see Next Up in the order Silo's Home uses. Without a
+// store, or when the read fails, it is the default, off.
+func (h *ItemsHandler) nextUpNewReleasesFirst(ctx context.Context, session *Session) bool {
+	if h.storeProvider == nil || session.ProfileID == "" {
+		return false
+	}
+	store, err := h.storeProvider.ForUser(ctx, session.StreamAppUserID)
+	if err != nil {
+		return false
+	}
+	return access.ResolveViewerPreferences(ctx, store, session.ProfileID).NextUpNewReleasesFirst
 }
 
 // writeNextUpResponse renders a slice of catalog.NextUpResult into the

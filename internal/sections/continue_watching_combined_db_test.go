@@ -46,7 +46,9 @@ func (c *nextUpWalkTracer) take() []string {
 // Continue Watching row: in-progress and next-up cards merge newest first and
 // the row stops at its item limit. When the in-progress cards fill the row on
 // their own, the next-up walk only reads series completed since the oldest of
-// them, since anything older could not make the row.
+// them, since anything older could not make the row. A profile showing new
+// releases first is the exception: a series finished before all of them leads
+// the row when its next episode was just released, so its walk is unbounded.
 func TestContinueWatchingCombinedRowKeepsNewestCardsDB(t *testing.T) {
 	dsn := os.Getenv("SILO_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -85,14 +87,17 @@ func TestContinueWatchingCombinedRowKeepsNewestCardsDB(t *testing.T) {
 
 	movies := []string{id("movie-1"), id("movie-2"), id("movie-3"), id("movie-4")}
 	// rewatch has two episodes in progress; recent was completed between the
-	// first and second movie; old was completed before every in-progress card.
-	rewatch, recent, old := id("rewatch"), id("recent"), id("old")
+	// first and second movie; old was completed before every in-progress card;
+	// returning was completed before them too, but its next episode was
+	// released after all of them.
+	rewatch, recent, old, returning := id("rewatch"), id("recent"), id("old"), id("returning")
 	episode := func(series string, n int) string { return fmt.Sprintf("%s-e%d", series, n) }
-	allItems := append([]string{rewatch, recent, old}, movies...)
+	allItems := append([]string{rewatch, recent, old, returning}, movies...)
 	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM episode_availability WHERE library_id = $1`, folderID)
 		_, _ = pool.Exec(ctx, `DELETE FROM media_files WHERE media_folder_id = $1`, folderID)
 		_, _ = pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID)
-		_, _ = pool.Exec(ctx, `DELETE FROM episodes WHERE series_id = ANY($1)`, []string{rewatch, recent, old})
+		_, _ = pool.Exec(ctx, `DELETE FROM episodes WHERE series_id = ANY($1)`, []string{rewatch, recent, old, returning})
 		_, _ = pool.Exec(ctx, `DELETE FROM media_items WHERE content_id = ANY($1)`, allItems)
 		_, _ = pool.Exec(ctx, `DELETE FROM media_folders WHERE id = $1`, folderID)
 	})
@@ -100,7 +105,7 @@ func TestContinueWatchingCombinedRowKeepsNewestCardsDB(t *testing.T) {
 	for _, movie := range movies {
 		exec(`INSERT INTO media_items (content_id, type, title, status, genres) VALUES ($1, 'movie', $1, 'matched', '{}'::text[])`, movie)
 	}
-	for _, series := range []string{rewatch, recent, old} {
+	for _, series := range []string{rewatch, recent, old, returning} {
 		exec(`INSERT INTO media_items (content_id, type, title, status, genres) VALUES ($1, 'series', $1, 'matched', '{}'::text[])`, series)
 		exec(`INSERT INTO episodes (content_id, series_id, season_number, episode_number, title, overview, runtime, rating_imdb) VALUES ($1, $3, 1, 1, 'One', '', 30, 0), ($2, $3, 1, 2, 'Two', '', 30, 0)`,
 			episode(series, 1), episode(series, 2), series)
@@ -123,6 +128,7 @@ func TestContinueWatchingCombinedRowKeepsNewestCardsDB(t *testing.T) {
 		{movies[2], false, 3 * time.Hour},
 		{movies[3], false, 4 * time.Hour},
 		{episode(old, 1), true, 10 * time.Hour},
+		{episode(returning, 1), true, 12 * time.Hour},
 	}
 	for _, p := range progress {
 		position := 600.0
@@ -133,17 +139,19 @@ func TestContinueWatchingCombinedRowKeepsNewestCardsDB(t *testing.T) {
 			userID, profileID, p.item, position, p.completed, now.Add(-p.at))
 	}
 
+	exec(`INSERT INTO episode_availability (library_id, episode_id, series_id, season_number, episode_number, episode_key, available_at, released_at)
+		VALUES ($1, $2, $3, 1, 2, 1000002, $4, $4)`, folderID, episode(returning, 2), returning, now.Add(-20*time.Minute))
+
 	provider := pgstore.NewPostgresProvider(pool)
 	fetcher := NewFetcher(pool)
 	fetcher.StoreProvider = provider
 	fetcher.NextUpRepo = catalog.NewNextUpRepository(pool, provider)
-	viewerCtx := access.SetScope(ctx, access.Scope{UserID: userID, ProfileID: profileID, NextUpMode: NextUpModeCombined})
-
 	tests := []struct {
-		name        string
-		limit       int
-		want        []string
-		boundedWalk bool
+		name             string
+		newReleasesFirst bool
+		limit            int
+		want             []string
+		boundedWalk      bool
 	}{
 		{
 			// The rewatch series counts once, so three in-progress cards fill
@@ -156,11 +164,27 @@ func TestContinueWatchingCombinedRowKeepsNewestCardsDB(t *testing.T) {
 		{
 			name:  "row short of its limit",
 			limit: 10,
-			want:  []string{episode(rewatch, 2), movies[0], episode(recent, 2), movies[1], movies[2], movies[3], episode(old, 2)},
+			want:  []string{episode(rewatch, 2), movies[0], episode(recent, 2), movies[1], movies[2], movies[3], episode(old, 2), episode(returning, 2)},
+		},
+		{
+			name:             "new releases first, in-progress cards fill the row",
+			newReleasesFirst: true,
+			limit:            3,
+			want:             []string{episode(returning, 2), episode(rewatch, 2), movies[0]},
+		},
+		{
+			name:             "new releases first, row short of its limit",
+			newReleasesFirst: true,
+			limit:            10,
+			want:             []string{episode(returning, 2), episode(rewatch, 2), movies[0], episode(recent, 2), movies[1], movies[2], movies[3], episode(old, 2)},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			viewerCtx := access.SetScope(ctx, access.Scope{
+				UserID: userID, ProfileID: profileID,
+				NextUpMode: NextUpModeCombined, NextUpNewReleasesFirst: tt.newReleasesFirst,
+			})
 			tracer.take()
 			section := ResolvedSection{
 				ID:          id("section"),

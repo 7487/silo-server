@@ -49,7 +49,7 @@ type SectionItemMeta struct {
 	DurationSeconds   *float64
 	ProgressUpdatedAt *string
 	ItemSource        string    // "in_progress" or "next_up"
-	SortTimestamp     time.Time // when the preceding episode was completed (for ordering)
+	SortTimestamp     time.Time // orders Continue Watching: progress time, or a next-up row's catalog.NextUpResult.ActivityAt
 }
 
 const recentSeasonPremiereBadgeWindowDays = 14
@@ -547,10 +547,19 @@ func (f *Fetcher) fetchContinueWatchingSection(ctx context.Context, resolved Res
 	}
 
 	// Combined mode merges next-up cards into the row and keeps the newest
-	// limit cards of the two.
+	// limit cards of the two. A next-up card normally sorts by when its
+	// previous episode was completed, so once the in-progress cards fill the
+	// row the lookup only needs series completed since the oldest of them.
+	// With new releases first, a series finished before all of them still
+	// leads the row when its next episode was just released, so the lookup is
+	// not bounded.
 	if combined {
-		since := continueNextUpCutoff(orderedItems, itemMeta, limit)
-		nextUpItems, nextUpMeta, nextUpErr := f.fetchNextUpItems(ctx, userID, profileID, effectiveLibID, effectiveLibraryIDs, filter, limit, since)
+		newReleasesFirst := NextUpNewReleasesFirst(ctx, store, profileID)
+		var since *time.Time
+		if !newReleasesFirst {
+			since = continueNextUpCutoff(orderedItems, itemMeta, limit)
+		}
+		nextUpItems, nextUpMeta, nextUpErr := f.fetchNextUpItems(ctx, userID, profileID, effectiveLibID, effectiveLibraryIDs, filter, limit, since, newReleasesFirst)
 		if nextUpErr != nil {
 			slog.ErrorContext(ctx, "fetching next-up items", "component", "sections", "error", nextUpErr)
 		} else {
@@ -855,7 +864,7 @@ func (f *Fetcher) fetchNextUpSection(ctx context.Context, resolved ResolvedSecti
 		limit = 20
 	}
 
-	items, meta, err := f.FetchNextUpItems(ctx, userID, profileID, libraryID, libraryIDs, filter, limit)
+	items, meta, err := f.fetchNextUpItems(ctx, userID, profileID, libraryID, libraryIDs, filter, limit, nil, NextUpNewReleasesFirst(ctx, store, profileID))
 	if err != nil {
 		return SectionWithItems{}, err
 	}
@@ -877,24 +886,35 @@ func (f *Fetcher) fetchNextUpSection(ctx context.Context, resolved ResolvedSecti
 // FetchNextUpItems returns the next unwatched episode per series for the given user profile.
 // It delegates to NextUpRepository for the optimized LATERAL JOIN query, then resolves
 // the full MediaItem objects via fetchEpisodeTargetsByContentIDs.
+// The order follows the profile's ui.next_up_new_releases_first.
 func (f *Fetcher) FetchNextUpItems(ctx context.Context, userID int, profileID string, libraryID *int, libraryIDs []int, filter catalog.AccessFilter, limit int) ([]*models.MediaItem, map[string]SectionItemMeta, error) {
-	return f.fetchNextUpItems(ctx, userID, profileID, libraryID, libraryIDs, filter, limit, nil)
+	if f.NextUpRepo == nil || f.StoreProvider == nil {
+		return nil, nil, nil
+	}
+	store, err := f.StoreProvider.ForUser(ctx, userID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("getting user store: %w", err)
+	}
+	return f.fetchNextUpItems(ctx, userID, profileID, libraryID, libraryIDs, filter, limit, nil, NextUpNewReleasesFirst(ctx, store, profileID))
 }
 
-// fetchNextUpItems is FetchNextUpItems limited, when since is set, to series
-// whose newest completed episode is at or after since.
-func (f *Fetcher) fetchNextUpItems(ctx context.Context, userID int, profileID string, libraryID *int, libraryIDs []int, filter catalog.AccessFilter, limit int, since *time.Time) ([]*models.MediaItem, map[string]SectionItemMeta, error) {
+// fetchNextUpItems is FetchNextUpItems with the profile's new-releases-first
+// preference already resolved, limited when since is set to series whose
+// newest completed episode is at or after since.
+func (f *Fetcher) fetchNextUpItems(ctx context.Context, userID int, profileID string, libraryID *int, libraryIDs []int, filter catalog.AccessFilter, limit int, since *time.Time, newReleasesFirst bool) ([]*models.MediaItem, map[string]SectionItemMeta, error) {
 	if f.NextUpRepo == nil {
 		return nil, nil, nil
 	}
 
 	results, err := f.NextUpRepo.ListNextUp(ctx, catalog.NextUpQuery{
-		UserID:     userID,
-		ProfileID:  profileID,
-		LibraryID:  libraryID,
-		LibraryIDs: libraryIDs,
-		Limit:      limit,
-		DateCutoff: since,
+		UserID:        userID,
+		ProfileID:     profileID,
+		LibraryID:     libraryID,
+		LibraryIDs:    libraryIDs,
+		AccessFilter:  filter,
+		Limit:         limit,
+		DateCutoff:    since,
+		RankByRelease: newReleasesFirst,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -932,7 +952,7 @@ func (f *Fetcher) fetchNextUpItems(ctx context.Context, userID int, profileID st
 			continue
 		}
 		m.ItemSource = "next_up"
-		m.SortTimestamp = res.CompletedAt
+		m.SortTimestamp = res.ActivityAt
 		meta[res.ContentID] = m
 
 		item, ok := itemByID[res.ContentID]
