@@ -2,6 +2,7 @@ package notifications
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -233,20 +234,32 @@ func TestMemoryTicketStore(t *testing.T) {
 	store := NewTicketStore(nil)
 	ctx := context.Background()
 
-	ticket, ttl, err := store.Mint(ctx, 7, "profile-1")
+	minted := Ticket{UserID: 7, ProfileID: "profile-1", ProfileToken: "proof"}
+	ticket, ttl, err := store.Mint(ctx, minted)
 	if err != nil || ticket == "" || ttl <= 0 {
 		t.Fatalf("mint failed: %q %v %v", ticket, ttl, err)
 	}
 
-	userID, profileID, ok := store.Consume(ctx, ticket)
-	if !ok || userID != 7 || profileID != "profile-1" {
-		t.Fatalf("consume returned %d %q %v", userID, profileID, ok)
+	binding, ok := store.Consume(ctx, ticket)
+	if !ok || binding != minted {
+		t.Fatalf("consume returned %+v %v", binding, ok)
 	}
 
-	if _, _, ok := store.Consume(ctx, ticket); ok {
+	if _, ok := store.Consume(ctx, ticket); ok {
 		t.Fatal("tickets must be single-use")
 	}
-	if _, _, ok := store.Consume(ctx, "unknown"); ok {
+	if _, ok := store.Consume(ctx, "unknown"); ok {
 		t.Fatal("unknown tickets must be rejected")
+	}
+
+	// A token no signed one could be is not kept: the viewer gate does not
+	// read X-Profile-Token for a profile without a PIN.
+	oversized := Ticket{UserID: 7, ProfileID: "profile-1", ProfileToken: strings.Repeat("x", maxTicketProofBytes+1)}
+	ticket, _, err = store.Mint(ctx, oversized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding, ok := store.Consume(ctx, ticket); !ok || binding != (Ticket{UserID: 7, ProfileID: "profile-1"}) {
+		t.Fatalf("oversized proof consumed as %+v %v", binding, ok)
 	}
 }
