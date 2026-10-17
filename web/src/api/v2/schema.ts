@@ -24190,6 +24190,12 @@ export interface components {
        */
       watched_at: string;
     };
+    HLSSubtitleRenditionV3: {
+      format: string;
+      group_id: string;
+      mime_type: string;
+      name: string;
+    };
     HomeCapabilities: {
       /** @description Whether the current principal may use the capability */
       allowed: boolean;
@@ -30440,6 +30446,7 @@ export interface components {
     SubtitleDecisionV3: {
       artifact?: components["schemas"]["SubtitleArtifactV3"];
       embedded?: components["schemas"]["EmbeddedSubtitleV3"];
+      hls_rendition?: components["schemas"]["HLSSubtitleRenditionV3"];
       inventory: components["schemas"]["SubtitleInventoryItemV3"][];
       mode: string;
       track_id?: string;
@@ -119239,6 +119246,8 @@ export interface operations {
   getPlaybackManifest: {
     parameters: {
       query?: {
+        /** @description Set by the multivariant playlist of a plan with subtitle.hls_rendition: video selects the media playlist, subtitles the WebVTT subtitle playlist. Absent, such a plan's manifest is the multivariant playlist. */
+        silo_rendition?: "video" | "subtitles";
         /** @description Signed stream reference the plan URL carries; it reconstructs the session after a restart. Omitted for header-authenticated media. Account and viewer authorization are always required. */
         st?: string;
         /** @description Media-element fallback for the account bearer token when an Authorization header cannot be set. Header-authenticated media requires the Authorization header and the profile selector. */
@@ -119381,6 +119390,7 @@ export interface operations {
         "X-Profile-Token"?: string;
       };
       path: {
+        /** @description Segment name from the media playlist. sub_NNNNN.vtt names a WebVTT subtitle rendition segment, answered from the cues already produced; one the transcode does not reach in time is an empty WebVTT document. */
         name: string;
         session_id: string;
       };
@@ -119401,6 +119411,7 @@ export interface operations {
         content: {
           "application/octet-stream": string;
           "multipart/byteranges": string;
+          "text/vtt": string;
           "video/mp2t": string;
           "video/mp4": string;
         };
@@ -119414,6 +119425,7 @@ export interface operations {
         content: {
           "application/octet-stream": string;
           "multipart/byteranges": string;
+          "text/vtt": string;
           "video/mp2t": string;
           "video/mp4": string;
         };
