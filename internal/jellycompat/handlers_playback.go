@@ -1412,6 +1412,9 @@ func (h *PlaybackHandler) buildProxyRedirectURL(
 	}
 	switch method {
 	case string(playback.PlayRemux):
+		if !source.TranscodeAudio {
+			claims.CopyAudioCodec = compatSourceAudioCodec(source)
+		}
 		claims.RoutingWorkload = string(noderouting.WorkloadRemux)
 		claims.RoutingExecution = string(noderouting.ExecutionProxy)
 		claims.RoutingExecutionNodeID = proxyNode.ID
@@ -3148,6 +3151,16 @@ func compatSourceAudioChannels(source PlaybackMediaSource) int {
 		return 0
 	}
 	return channels
+}
+
+// compatSourceAudioCodec is the selected source audio track's codec, or empty
+// when the source has no such track.
+func compatSourceAudioCodec(source PlaybackMediaSource) string {
+	audioTrackIndex := compatAudioTrackIndexOrDefault(source)
+	if audioTrackIndex < 0 || audioTrackIndex >= len(source.Version.AudioTracks) {
+		return ""
+	}
+	return source.Version.AudioTracks[audioTrackIndex].Codec
 }
 
 func isValidCompatAudioStreamIndex(version catalog.FileVersion, streamIndex int) bool {
