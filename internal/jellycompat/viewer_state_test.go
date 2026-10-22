@@ -124,6 +124,12 @@ func TestPlayedMutationsReturnCurrentDTOAndDate(t *testing.T) {
 				t.Fatalf("mark played %d %+v %s", rec.Code, dto, rec.Body.String())
 			}
 			rec = httptest.NewRecorder()
+			h.HandleUpdateUserData(rec, viewerRequest("POST", "/", `{"Played":true,"PlaybackPositionTicks":0,"LastPlayedDate":"2025-02-03T04:05:06Z"}`, "itemId", id, session))
+			history, err := store.ListHistory(t.Context(), session.ProfileID, 10, 0)
+			if rec.Code != 200 || err != nil || len(history) != 1 {
+				t.Fatalf("user data duplicated played history: status=%d history=%+v error=%v", rec.Code, history, err)
+			}
+			rec = httptest.NewRecorder()
 			h.HandleMarkUnplayed(rec, viewerRequest("DELETE", "/", "", "itemId", id, session))
 			_ = json.Unmarshal(rec.Body.Bytes(), &dto)
 			if rec.Code != 200 || dto.Played {
@@ -440,8 +446,8 @@ func TestUserDataZeroDateUsesCurrentTime(t *testing.T) {
 				t.Fatalf("historical date changed: %s", dto.LastPlayedDate)
 			}
 			history, err := store.ListHistory(t.Context(), "profile-1", 10, 0)
-			if err != nil || len(history) != 1 || history[0].WatchedAt != actual.UTC().Format(time.RFC3339) {
-				t.Fatalf("history and progress dates disagree: %+v %v", history, err)
+			if err != nil || len(history) != 0 {
+				t.Fatalf("user data created played history: %+v %v", history, err)
 			}
 		})
 	}
