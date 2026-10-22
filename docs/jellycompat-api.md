@@ -618,7 +618,10 @@ connection's shared budget, as described in
   locked name answers 429 `TooManyRequests` with `Retry-After`. It reads at
   most 64 KiB of the body: when decoding the JSON value needs more, it answers
   413 with `{"Error":"PayloadTooLarge",...}` before any credential check. Only
-  the first JSON value is decoded; data after it is ignored, not rejected.
+  the first JSON value is decoded; data after it is ignored, not rejected. A
+  server too busy to check the password answers 503 `ServiceUnavailable`
+  with `Retry-After`, not a wrong password (see
+  [When the server is too busy to check a password](auth-api.md#when-the-server-is-too-busy-to-check-a-password)).
 - The Quick Connect routes spend the native device sign-in budgets, as the
   native device operations do: Initiate spends `device_start`, Connect and
   `/Users/AuthenticateWithQuickConnect` spend `device_poll`, and Authorize
