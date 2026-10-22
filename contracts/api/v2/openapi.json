@@ -11282,6 +11282,14 @@
           "play_method": {
             "type": "string"
           },
+          "played_seconds": {
+            "description": "Seconds of the media watched by normal playback, excluding pauses, seeks and buffering; null when the play has no watch-time measurement, which includes every play recorded before it existed",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
           "profile_id": {
             "type": "string"
           },
@@ -11325,6 +11333,7 @@
             "type": "string"
           },
           "watched_seconds": {
+            "description": "Position the play ended at, in seconds. Not how long it was watched: a play resumed partway through reports the resume point plus what was watched; played_seconds is the watch time",
             "format": "double",
             "type": "number"
           }
@@ -11345,6 +11354,7 @@
           "watched_seconds",
           "duration_seconds",
           "completed",
+          "played_seconds",
           "series_title",
           "season_number",
           "episode_number"

@@ -16627,6 +16627,11 @@ export interface components {
       /** @description episode, or the catalog item type; empty when unknown */
       media_type: string;
       play_method: string;
+      /**
+       * Format: double
+       * @description Seconds of the media watched by normal playback, excluding pauses, seeks and buffering; null when the play has no watch-time measurement, which includes every play recorded before it existed
+       */
+      played_seconds: number | null;
       profile_id: string;
       /** @description Profile display name at the time of playback; the profile id when none was recorded */
       profile_name: string;
@@ -16651,7 +16656,10 @@ export interface components {
       user_id: string;
       /** @description Empty when the account no longer exists */
       username: string;
-      /** Format: double */
+      /**
+       * Format: double
+       * @description Position the play ended at, in seconds. Not how long it was watched: a play resumed partway through reports the resume point plus what was watched; played_seconds is the watch time
+       */
       watched_seconds: number;
     };
     AdminPlaybackReliability: {
