@@ -488,6 +488,9 @@
 ./internal/scanqueue TestRequeueLeavesACancelledRunCancelledDB
 ./internal/scanqueue TestRequeueLeavesALaterClaimRunningDB
 
+# Password sign-in spends one attempt budget per name on every surface.
+./internal/auth TestSignInNameBudgetDB
+
 # The Jellyfin play-session lifetime moves from the old 6h seed to 24h and
 # keeps a value an administrator chose.
 ./migrations TestJellyfinCompatPlaySessionTTLMigrationPostgres
