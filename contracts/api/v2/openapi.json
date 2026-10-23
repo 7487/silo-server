@@ -8815,6 +8815,12 @@
             ]
           },
           "status": {
+            "description": "Match status; null leaves it unchanged",
+            "enum": [
+              "pending",
+              "matched",
+              "unmatched"
+            ],
             "type": [
               "string",
               "null"
