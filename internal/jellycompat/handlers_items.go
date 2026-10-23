@@ -173,13 +173,21 @@ func (h *ItemsHandler) userViews(ctx context.Context, session *Session) ([]baseI
 		order = h.loadUserViewOrder(ctx, session)
 		sortByPreferredOrder(libraries, order.libraryOrder, func(library upstreamUserLibrary) string { return strconv.Itoa(library.ID) })
 	}
+	items = append(items, h.libraryViews(libraries)...)
+	sortByPreferredOrder(items, order.orderedViews, func(item baseItemDTO) string { return item.ID })
+	return items, nil
+}
+
+// libraryViews maps libraries to their CollectionFolder items, remembering
+// each library's artwork for the image routes.
+func (h *ItemsHandler) libraryViews(libraries []upstreamUserLibrary) []baseItemDTO {
+	items := make([]baseItemDTO, 0, len(libraries))
 	for _, library := range libraries {
 		dto := h.mapper.viewFromLibrary(library)
 		h.rememberLibraryImages(library, dto.ID)
 		items = append(items, dto)
 	}
-	sortByPreferredOrder(items, order.orderedViews, func(item baseItemDTO) string { return item.ID })
-	return items, nil
+	return items
 }
 
 // HandleItems serves GET /Items.
@@ -1014,6 +1022,36 @@ func (h *ItemsHandler) HandleGroupingOptionsStub(w http.ResponseWriter, r *http.
 // setting's default.
 func enableRealtimeMonitor(server func() bool, library bool) bool {
 	return library && (server == nil || server())
+}
+
+const compatMediaFoldersPath = "/Library/MediaFolders"
+
+// HandleMediaFolders serves GET /Library/MediaFolders: the session's visible
+// libraries as CollectionFolder items with the same Ids as /UserViews. Jellyfin
+// SDK getMediaFolders() discovers libraries here (Maintainerr, for one). The
+// synthetic Collections view is a view, not a media folder, so it is omitted.
+// Silo has no hidden media folders, so isHidden=true lists none.
+func (h *ItemsHandler) HandleMediaFolders(w http.ResponseWriter, r *http.Request) {
+	session := SessionFromContext(r.Context())
+	if session == nil {
+		writeError(w, http.StatusUnauthorized, "Unauthorized", "Missing authentication token")
+		return
+	}
+
+	items := []baseItemDTO{}
+	if !parseBool(newCaseInsensitiveQuery(r.URL.Query()).Get("isHidden"), false) {
+		libraries, err := h.content.ListUserLibraries(r.Context(), session)
+		if err != nil {
+			writeCompatUpstreamError(w, err)
+			return
+		}
+		items = h.libraryViews(libraries)
+	}
+	writeJSON(w, http.StatusOK, queryResultDTO{
+		Items:            items,
+		TotalRecordCount: len(items),
+		StartIndex:       0,
+	})
 }
 
 // HandleVirtualFolders serves GET /Library/VirtualFolders.

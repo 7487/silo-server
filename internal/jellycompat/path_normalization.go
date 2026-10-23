@@ -136,6 +136,8 @@ func canonicalizeCompatPath(path string) string {
 		return "/QuickConnect/Authorize"
 	case "/users/authenticatewithquickconnect":
 		return "/Users/AuthenticateWithQuickConnect"
+	case "/library/mediafolders":
+		return compatMediaFoldersPath
 	}
 	for i := 1; i < len(parts); i++ {
 		part := parts[i]
