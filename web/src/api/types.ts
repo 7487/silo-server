@@ -3374,6 +3374,7 @@ export interface AdminDeviceSummary {
 }
 
 export interface AdminDeviceDetail {
+  connections?: V2Components["schemas"]["AdminDeviceConnection"][];
   user_id: number;
   username: string;
   email: string;

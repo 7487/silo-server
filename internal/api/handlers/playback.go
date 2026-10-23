@@ -33,6 +33,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/nodepool"
 	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/playback/connectionstore"
 	"github.com/Silo-Server/silo-server/internal/settingscontract"
 	"github.com/Silo-Server/silo-server/internal/settingskeys"
 	"github.com/Silo-Server/silo-server/internal/settingsresolve"
@@ -184,6 +185,10 @@ type copySeekAnchorResolver func(
 
 // PlaybackHandler handles playback session HTTP endpoints.
 type PlaybackHandler struct {
+	Connections *connectionstore.Store
+	// SourceBitrates sets the connection speed test's target; nil sends none.
+	SourceBitrates         SourceBitratePercentiler
+	probeTargets           probeTargetCache
 	sessionMgr             SessionManagerInterface
 	fileResolver           FilePathResolver            // optional; enables stream_url in responses
 	StoreProvider          userstore.UserStoreProvider // optional; enables progress/history persistence
