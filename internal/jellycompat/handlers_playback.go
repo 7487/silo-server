@@ -2795,7 +2795,14 @@ func (h *PlaybackHandler) mediaSourceDTO(routeItemID, playSessionID, compatToken
 			url.QueryEscape(playSessionID),
 		)
 	}
-	dto.TranscodingSubProtocol = "hls"
+	// Jellyfin Web and jellyfin-android play the direct URL whenever either
+	// direct flag is set, and Jellyfin Web picks hls.js from this field alone,
+	// so only a transcode-only source reports hls. Swiftfin plays any
+	// TranscodingUrl it gets and shows this field only as a label.
+	dto.TranscodingSubProtocol = compatStreamProtocolHTTP
+	if source.SupportsTranscoding && !source.SupportsDirectPlay && !source.SupportsDirectStream {
+		dto.TranscodingSubProtocol = compatStreamProtocolHLS
+	}
 	if source.SupportsTranscoding {
 		basePath := compatVideoPath(routeItemID, false)
 		if routePathSegment := compatHLSRoutePathSegment(source); routePathSegment != "" {
