@@ -243,6 +243,8 @@
 ./internal/notifications TestSeriesMutesUnmuteAndPurge
 ./internal/metadata TestCanonicalizeMediaItemReferencesMergesNotificationMutesPostgres
 ./internal/catalog/reattribute TestMovePairsMovesNotificationMutesDB
+./internal/catalog/reattribute TestMovedHistoryKeepsItsCutoffsDB
+./internal/metadata TestRenameContentIDKeepsUnmarkOnLeftoverCutoffDB
 ./internal/requests TestEditorIntegrationsDatabase
 ./internal/requests TestIntegrationKeyStaysWithItsAddressDatabase
 ./internal/requests TestClosingRequestForgetsFollowsDatabase
@@ -278,6 +280,7 @@
 ./internal/userstore/pgstore TestPostgresConcurrentProfileDeleteAndCollectionReorder
 ./internal/api/handlers TestEbookReaderPurgeProfileDB
 ./internal/userstore/pgstore TestPostgresMarkWatchedBatch
+./internal/userstore/pgstore TestPostgresUnmarkKeepsHistory
 ./internal/userstore/pgstore TestPostgresPersonalListPage
 ./internal/userstore/pgstore TestPostgresReplaceCollectionItemsWritesOnlyTheDifference
 
