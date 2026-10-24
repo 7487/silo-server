@@ -127,9 +127,10 @@ func splitRatingSourceList(raw string) (sources []string, malformed string) {
 // Shared server-setting keys used by playback and prepared-download policy
 // readers. Keep them here with the effective admin-setting defaults.
 const (
-	Allow4KTranscodeSettingKey               = "allow_4k_transcode"
-	PlaybackAllowHEVCEncodingSettingKey      = "playback.allow_hevc_encoding"
-	DownloadLocalTranscodeFallbackSettingKey = "download.local_transcode_fallback"
+	Allow4KTranscodeSettingKey                    = "allow_4k_transcode"
+	PlaybackAllowHEVCEncodingSettingKey           = "playback.allow_hevc_encoding"
+	PlaybackPreferLowerVersionTranscodeSettingKey = "playback.prefer_lower_version_transcode"
+	DownloadLocalTranscodeFallbackSettingKey      = "download.local_transcode_fallback"
 )
 
 // ArtworkStorageReconcileCheckpointKey is machine-managed task state. It is
@@ -361,6 +362,7 @@ var adminSettingDefaults = map[string]string{
 	"playback.hw_accel":                              "auto",
 	"playback.transcode_enabled":                     "true",
 	PlaybackAllowHEVCEncodingSettingKey:              "false",
+	PlaybackPreferLowerVersionTranscodeSettingKey:    "true",
 	PlaybackRoutingDirectPlayEgressSettingKey:        string(PlaybackEgressPreferProxy),
 	PlaybackRoutingRemuxExecutionSettingKey:          string(PlaybackExecutionPreferTranscode),
 	PlaybackRoutingRemuxEgressSettingKey:             string(PlaybackEgressPreferProxy),
@@ -632,7 +634,7 @@ func NormalizeAdminSetting(key, raw string) (string, error) {
 	value := strings.TrimSpace(raw)
 
 	switch key {
-	case "metadata.cache_images", "playback.transcode_enabled", PlaybackAllowHEVCEncodingSettingKey,
+	case "metadata.cache_images", "playback.transcode_enabled", PlaybackAllowHEVCEncodingSettingKey, PlaybackPreferLowerVersionTranscodeSettingKey,
 		PlaybackKeyframePlaylistSettingKey, PlaybackBandwidthProbeAutomaticSettingKey,
 		ChapterThumbnailSoftwareToneMapSettingKey, PlaybackTranscodeHardwareToneMapSettingKey,
 		PlaybackTranscodeSoftwareToneMapSettingKey, CatalogScopeVersionsToLibrarySettingKey,
