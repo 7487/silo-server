@@ -446,8 +446,8 @@ func TestUserDataZeroDateUsesCurrentTime(t *testing.T) {
 				t.Fatalf("historical date changed: %s", dto.LastPlayedDate)
 			}
 			history, err := store.ListHistory(t.Context(), "profile-1", 10, 0)
-			if err != nil || len(history) != 0 {
-				t.Fatalf("user data created played history: %+v %v", history, err)
+			if err != nil || len(history) != 1 || history[0].WatchedAt != actual.UTC().Format(time.RFC3339) {
+				t.Fatalf("history and progress dates disagree: %+v %v", history, err)
 			}
 		})
 	}

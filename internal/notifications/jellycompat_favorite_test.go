@@ -83,11 +83,6 @@ func TestAtomicJellycompatFavoritesNotifyOnlyAfterCommit(t *testing.T) {
 				if observer.calls != 1 {
 					t.Fatalf("completion callbacks=%d", observer.calls)
 				}
-				if favorite && tc.name == "item" {
-					if _, err := store.AddHistoryIfMissing(t.Context(), userstore.WatchHistoryEntry{ProfileID: "profile-1", MediaItemID: "item-1", WatchedAt: edit.EventAt.Format(time.RFC3339), Completed: true}); err != nil {
-						t.Fatal(err)
-					}
-				}
 				actual, err := store.IsFavorite(t.Context(), "profile-1", tc.favoriteID)
 				if err != nil || actual != favorite {
 					t.Fatalf("favorite=%v error=%v", actual, err)

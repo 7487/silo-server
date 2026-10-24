@@ -547,9 +547,6 @@ func TestAtomicJellycompatProgressNotifiesOnlyAfterCommit(t *testing.T) {
 	if observer.calls != 1 || len(updater.pending) != 1 {
 		t.Fatal("committed edit did not notify observers")
 	}
-	if _, err := store.AddHistoryIfMissing(t.Context(), userstore.WatchHistoryEntry{ProfileID: "profile-1", MediaItemID: "item-1", WatchedAt: date.Format(time.RFC3339), Completed: true}); err != nil {
-		t.Fatal(err)
-	}
 	clear(updater.pending)
 	edit.PositionSeconds = 321
 	edit.Completed = false
