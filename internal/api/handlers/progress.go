@@ -10,6 +10,7 @@ import (
 
 	"github.com/Silo-Server/silo-server/internal/access"
 	apimw "github.com/Silo-Server/silo-server/internal/api/middleware"
+	"github.com/Silo-Server/silo-server/internal/clientclock"
 	evt "github.com/Silo-Server/silo-server/internal/events"
 	"github.com/Silo-Server/silo-server/internal/userstore"
 )
@@ -475,8 +476,8 @@ func (h *ProgressHandler) SyncProgress(ctx context.Context, userID int, profileI
 			// never the timestamp alone.
 			client := item.UpdatedAt.UTC()
 			now := time.Now()
-			eventAt := userstore.ClampProgressEventAt(client, now)
-			if !client.IsZero() && !eventAt.Equal(client) {
+			eventAt := clientclock.Clamp(client, now)
+			if !client.IsZero() && clientclock.TooFarAhead(client, now) {
 				slog.WarnContext(ctx, "clamped future-dated progress event time", "component", "api",
 					"profile_id", profileID, "media_item_id", item.MediaItemID)
 			}

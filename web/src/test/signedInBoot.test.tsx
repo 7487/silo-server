@@ -133,6 +133,23 @@ async function releaseUntilQuiet(server: FakeServer) {
   throw new Error(`boot did not settle:\n${describeRequests(server.requests)}`);
 }
 
+function setTabVisibility(state: DocumentVisibilityState) {
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+  document.dispatchEvent(new Event("visibilitychange"));
+}
+
+/** Hides the tab for `ms`, shows it again, and answers whatever that sent. */
+async function switchTabAway(server: FakeServer, ms: number) {
+  await act(async () => {
+    setTabVisibility("hidden");
+  });
+  await advanceClock(ms);
+  await act(async () => {
+    setTabVisibility("visible");
+  });
+  await releaseUntilQuiet(server);
+}
+
 async function boot(server: FakeServer) {
   render(<App />);
   await releaseUntilQuiet(server);
@@ -179,6 +196,7 @@ describe("app boot request budget", () => {
   });
 
   afterEach(() => {
+    Reflect.deleteProperty(document, "visibilityState");
     queryClient.clear();
     setAccessToken(null);
     vi.unstubAllGlobals();
@@ -198,12 +216,18 @@ describe("app boot request budget", () => {
       unauthorized: 0,
       refreshes: 1,
       duplicateGets: 0,
-      total: 13,
+      // Includes the speed test schedule's capabilities read, which keeps the
+      // connection reading current for a playback start in the first seconds.
+      total: 14,
     });
     // Home starts loading as soon as the token is back, beside the account read.
     const waveOf = (operation: string) =>
       server.requests.find((request) => request.operation?.startsWith(operation))?.wave;
     expect(waveOf("GET /api/v2/home/layout"), log).toBe(waveOf("GET /api/v2/account/me"));
+    // The connection reading never holds up the first screen.
+    expect(waveOf("GET /api/v2/playback/capabilities")!, log).toBeGreaterThan(
+      waveOf("GET /api/v2/home/layout")!,
+    );
     // The session restore starts beside the public setup reads, not after them.
     expect(
       server.requests.filter((request) => request.wave === 1).map((request) => request.operation),
@@ -250,6 +274,8 @@ describe("app boot request budget", () => {
     signInReturningOwner();
     await boot(server);
     expect(screen.getByTestId("home"), describeRequests(server.requests)).toBeInTheDocument();
+    // A connection speed reading the session kept for playback starts.
+    storage.set(storage.KEYS.BANDWIDTH_ESTIMATE, '{"readings":[],"writtenAt":0}');
 
     server.revokeSessions();
     await act(async () => {
@@ -262,6 +288,8 @@ describe("app boot request budget", () => {
     expect(screen.queryByTestId("home"), log).not.toBeInTheDocument();
     expect(appRouter!.state.location.pathname, log).toBe("/login");
     expect(storage.get(storage.KEYS.REFRESH_TOKEN)).toBeNull();
+    // A reading from before a sign-out goes with it.
+    expect(storage.get(storage.KEYS.BANDWIDTH_ESTIMATE)).toBeNull();
     // One refused refresh is shared; nothing retries the rejected session.
     const refusedRefreshes = server.requests.filter(
       (request) => request.operation === "POST /api/v2/auth/refresh" && request.status === 401,
@@ -413,6 +441,30 @@ describe("app boot request budget", () => {
       viewedAccount.filter((request) => request.operation === "GET /api/v2/profiles"),
       log,
     ).toHaveLength(2);
+  });
+
+  it("sends nothing after a short tab switch and catches up once after a long one", async () => {
+    signInReturningOwner();
+    await boot(server);
+    const bootRequests = server.requests.length;
+    const sinceBoot = () => server.requests.slice(bootRequests);
+
+    // A quick switch keeps the events socket open, so the cache is still current,
+    // and leaves the tab on the network whose speed it already read.
+    await switchTabAway(server, 5_000);
+    expect(describeRequests(sinceBoot())).toBe("");
+
+    // A long absence closes the socket; the return re-reads the screen once.
+    await switchTabAway(server, 2 * 60_000);
+    const afterAbsence = sinceBoot();
+    const log = describeRequests(afterAbsence);
+    expect(measureBoot(afterAbsence), log).toMatchObject({ unauthorized: 0, duplicateGets: 0 });
+    for (const operation of ["GET /api/v2/home/layout", "POST /api/v2/events/ws-ticket"]) {
+      expect(
+        afterAbsence.filter((request) => request.operation === operation),
+        log,
+      ).toHaveLength(1);
+    }
   });
 
   it("sends no account reads from the login screen", async () => {

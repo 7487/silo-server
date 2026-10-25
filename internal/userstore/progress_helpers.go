@@ -8,17 +8,6 @@ import (
 	"time"
 )
 
-const progressClockSkew = 2 * time.Minute
-
-// ClampProgressEventAt prevents a client clock from claiming a far-future
-// last-write-wins timestamp while preserving historical and near-future times.
-func ClampProgressEventAt(client, now time.Time) time.Time {
-	if client.IsZero() || client.After(now.Add(progressClockSkew)) {
-		return now
-	}
-	return client
-}
-
 type HistoryVisibilityStore interface {
 	VisibleHistoryTimestamps(ctx context.Context, profileID string, mediaItemIDs []string, at time.Time) (map[string]string, error)
 }
@@ -75,6 +64,9 @@ type MarkWatchedTarget struct {
 	// EventAt preserves an explicitly supplied progress date while the write
 	// timestamp advances independently. Nil retains normal manual-mark timing.
 	EventAt *time.Time
+	// RecordRewatch marks a completed target that has a resume position again,
+	// recording its play; otherwise a completed target is left as it is.
+	RecordRewatch bool
 }
 
 // WatchedBatchWriter is an optional store capability: mark every target

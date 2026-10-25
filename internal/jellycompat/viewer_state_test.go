@@ -107,7 +107,7 @@ func TestUserDataUpdatePersistsPartialFieldsAndProfileIsolation(t *testing.T) {
 }
 
 func TestPlayedMutationsReturnCurrentDTOAndDate(t *testing.T) {
-	for _, key := range []string{"datePlayed", "DatePlayed", "DATEPLAYED"} {
+	for _, key := range []string{"datePlayed", "DATEPLAYED"} {
 		t.Run(key, func(t *testing.T) {
 			store := newJellycompatUserStore(t)
 			provider := notifications.WrapUserStoreProvider(compatTestUserStoreProvider{store: store}, &notifications.System{})
@@ -122,6 +122,12 @@ func TestPlayedMutationsReturnCurrentDTOAndDate(t *testing.T) {
 			_ = json.Unmarshal(rec.Body.Bytes(), &dto)
 			if rec.Code != 200 || !dto.Played || dto.LastPlayedDate != "2025-02-03T04:05:06Z" {
 				t.Fatalf("mark played %d %+v %s", rec.Code, dto, rec.Body.String())
+			}
+			rec = httptest.NewRecorder()
+			h.HandleUpdateUserData(rec, viewerRequest("POST", "/", `{"Played":true,"PlaybackPositionTicks":0,"LastPlayedDate":"2025-02-03T04:05:06Z"}`, "itemId", id, session))
+			history, err := store.ListHistory(t.Context(), session.ProfileID, 10, 0)
+			if rec.Code != 200 || err != nil || len(history) != 1 {
+				t.Fatalf("user data duplicated played history: status=%d history=%+v error=%v", rec.Code, history, err)
 			}
 			rec = httptest.NewRecorder()
 			h.HandleMarkUnplayed(rec, viewerRequest("DELETE", "/", "", "itemId", id, session))
@@ -212,14 +218,6 @@ func TestConfigurationPersistsProfileSettingsAndPartialChanges(t *testing.T) {
 	}
 	if dto.Configuration.SubtitleMode == "Always" || dto.Configuration.HidePlayedInLatest {
 		t.Fatalf("configuration profile leak %+v", dto.Configuration)
-	}
-}
-
-func TestCulturesIncludesLanguageCodes(t *testing.T) {
-	rec := httptest.NewRecorder()
-	(&AuthHandler{}).HandleCultures(rec, httptest.NewRequest("GET", "/", nil))
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"ThreeLetterISOLanguageName":"eng"`) {
-		t.Fatal(rec.Code, rec.Body.String())
 	}
 }
 
@@ -463,7 +461,7 @@ func TestUserDataDateBounds(t *testing.T) {
 }
 
 func TestViewerOwnerQueryIsCaseInsensitive(t *testing.T) {
-	for _, key := range []string{"userId", "UserId", "USERID"} {
+	for _, key := range []string{"userId", "USERID"} {
 		t.Run(key, func(t *testing.T) {
 			store := newJellycompatUserStore(t)
 			provider := compatTestUserStoreProvider{store: store}

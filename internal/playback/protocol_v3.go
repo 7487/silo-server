@@ -11,7 +11,15 @@ import (
 )
 
 const (
+	BandwidthEstimateProbeV3            = "probe"
+	BandwidthEstimateObservedRebufferV3 = "observed_rebuffer"
+	LearnedLimitIgnoreV3                = "ignore"
+	LearnedLimitClearV3                 = "clear"
+
 	ProtocolV3                               = 3
+	FeatureBufferingQualityV1                = "buffering_quality_v1"
+	FeatureConnectionSpeedV1                 = "connection_speed_v1"
+	FeaturePlaybackPlanSummaryV1             = "playback_plan_summary_v1"
 	FeaturePlaybackPlanV3                    = "playback_plan_v3"
 	FeatureServerRemoteStreamBitratePolicyV3 = "server_remote_stream_bitrate_policy_v1"
 	FeatureServerLocalStreamBitratePolicyV3  = "server_local_stream_bitrate_policy_v1"
@@ -75,12 +83,32 @@ const (
 	// of the WebVTT conversion, which cannot carry every SRT feature. Embedded
 	// SRT tracks keep their existing delivery. It exists only on /api/v2 (see
 	// NativeServerFeaturesV3).
-	FeatureMarkerThumbnailsV3  = "marker_thumbnails_v1"
-	FeatureSubripSidecarV3     = "subrip_sidecar_v1"
-	PlanRecipeVersionV3        = "v3.4"
-	ClientDV7ToDV81V3          = "client_dv7_to_dv81"
-	ClientDV7ToHDR10V3         = "client_dv7_to_hdr10"
-	ClientDVTransformVersionV3 = "1"
+	FeatureMarkerThumbnailsV3 = "marker_thumbnails_v1"
+	FeatureSubripSidecarV3    = "subrip_sidecar_v1"
+	// FeatureHLSSubtitleRenditionsV3 is the client's statement that it plays
+	// a subtitle carried as a WebVTT SUBTITLES rendition of the plan's HLS
+	// stream (subtitle.hls_rendition) instead of a sidecar artifact. Only a
+	// server_transcode_hls plan uses it, for an embedded text track. It
+	// exists only on /api/v2 (see NativeServerFeaturesV3).
+	FeatureHLSSubtitleRenditionsV3 = "hls_subtitle_renditions_v1"
+	// FeaturePlanActiveQualityV3 tells a client the plan names the
+	// available_qualities entry it delivers in active_quality, so an absent
+	// active_quality means "no entry" rather than "a server that predates
+	// the field". It exists only on /api/v2 (see NativeServerFeaturesV3).
+	FeaturePlanActiveQualityV3 = "plan_active_quality_v1"
+	// FailureSubtitleHLSRenditionFailedV3 is the failure_recovery
+	// classification a client sends when the plan's subtitle rendition never
+	// became selectable in its player. The server stops offering renditions
+	// for the rest of the attempt, as subtitle_embedded_failed does for
+	// native embedded selection.
+	FailureSubtitleHLSRenditionFailedV3 = "subtitle_hls_rendition_failed"
+	// FailureSubtitleEmbeddedFailedV3 is the failure_recovery classification
+	// for a native embedded selection the player could not mount.
+	FailureSubtitleEmbeddedFailedV3 = "subtitle_embedded_failed"
+	PlanRecipeVersionV3             = "v3.4"
+	ClientDV7ToDV81V3               = "client_dv7_to_dv81"
+	ClientDV7ToHDR10V3              = "client_dv7_to_hdr10"
+	ClientDVTransformVersionV3      = "1"
 	// ClaimClientManagedDynamicRangeV3 is scoped to the original_http
 	// delivery. A client that advertises it accepts responsibility for mapping
 	// any source dynamic range it declares decodable onto the active output;
@@ -112,6 +140,7 @@ const (
 	TransportFeatureProgressiveRemuxRelayV1     = "progressive_remux_relay_v1"
 	// Theme audio markers: a proxy that serves /stream/theme, and a transcode
 	// node that approves theme files as progressive AAC inputs.
+	TransportFeatureBandwidthProbeV1      = "bandwidth_probe_v1"
 	TransportFeatureThemeAudioEgressV1    = "theme_audio_egress_v1"
 	TransportFeatureThemeAudioExecutionV1 = "theme_audio_execution_v1"
 	// A transcode node that executes the multi-track prepared-download layout
@@ -123,6 +152,9 @@ const (
 	// request names, decodes on CUDA, and repairs missing and repeated cells.
 	// API servers that send the signal only use nodes that advertise it.
 	TransportFeatureTrickplayExtractV2 = "trickplay_extract_v2"
+	// A transcode node that emits and serves an HLS WebVTT subtitle rendition
+	// (TranscodeOpts.SubtitleRendition).
+	TransportFeatureHLSSubtitleRenditionV1 = "hls_subtitle_rendition_v1"
 )
 
 // Degradation warning codes reported by playback plans.
@@ -191,7 +223,7 @@ func ServerFeaturesV3() []string {
 // advertises and honors only on /api/v2. They postdate the /api/v1 freeze, so
 // the frozen surface neither advertises nor negotiates them.
 func NativeServerFeaturesV3() []string {
-	return append(ServerFeaturesV3(), FeatureSubripSidecarV3, FeatureMarkerThumbnailsV3)
+	return append(ServerFeaturesV3(), FeatureBufferingQualityV1, FeaturePlaybackPlanSummaryV1, FeatureSubripSidecarV3, FeatureMarkerThumbnailsV3, FeatureHLSSubtitleRenditionsV3, FeaturePlanActiveQualityV3)
 }
 
 // WithoutFeatureV3 returns features with every spelling of feature removed.
@@ -628,6 +660,9 @@ type StartRequestV3 struct {
 	SubtitleTrackIndex         *int                      `json:"subtitle_track_index,omitempty"`
 	Metered                    bool                      `json:"metered"`
 	BandwidthEstimateKbps      *int                      `json:"bandwidth_estimate_kbps,omitempty"`
+	BandwidthEstimateSource    string                    `json:"bandwidth_estimate_source,omitempty"`
+	ObservedThroughputKbps     *int                      `json:"observed_throughput_kbps,omitempty"`
+	LearnedLimit               string                    `json:"learned_limit,omitempty"`
 	BandwidthCapKbps           *int                      `json:"bandwidth_cap_kbps,omitempty"`
 	Capabilities               ClientCodecCapabilitiesV3 `json:"client_capabilities"`
 	ClientPlaybackContext      ClientPlaybackContextV3   `json:"client_playback_context"`
@@ -698,23 +733,27 @@ type ReplanRequestV3 struct {
 	// LocalMutations reports client-applied local plan mutations (for example
 	// a PCM recovery route) so the server can fold them into the attempt key it
 	// computes for the failed plan. Clients never hash anything themselves.
-	LocalMutations        []string                  `json:"local_mutations,omitempty"`
-	AttemptCount          int                       `json:"attempt_count"`
-	QualityPreference     string                    `json:"quality_preference"`
-	PositionSeconds       float64                   `json:"position_seconds"`
-	Metered               bool                      `json:"metered"`
-	BandwidthEstimateKbps *int                      `json:"bandwidth_estimate_kbps,omitempty"`
-	BandwidthCapKbps      *int                      `json:"bandwidth_cap_kbps,omitempty"`
-	SelectedTracks        SelectedTracksV3          `json:"selected_tracks"`
-	Failure               FailureV3                 `json:"failure,omitzero"`
-	Capabilities          ClientCodecCapabilitiesV3 `json:"client_capabilities"`
-	ClientPlaybackContext ClientPlaybackContextV3   `json:"client_playback_context"`
+	LocalMutations          []string                  `json:"local_mutations,omitempty"`
+	AttemptCount            int                       `json:"attempt_count"`
+	QualityPreference       string                    `json:"quality_preference"`
+	PositionSeconds         float64                   `json:"position_seconds"`
+	Metered                 bool                      `json:"metered"`
+	BandwidthEstimateKbps   *int                      `json:"bandwidth_estimate_kbps,omitempty"`
+	BandwidthEstimateSource string                    `json:"bandwidth_estimate_source,omitempty"`
+	ObservedThroughputKbps  *int                      `json:"observed_throughput_kbps,omitempty"`
+	LearnedLimit            string                    `json:"learned_limit,omitempty"`
+	BandwidthCapKbps        *int                      `json:"bandwidth_cap_kbps,omitempty"`
+	SelectedTracks          SelectedTracksV3          `json:"selected_tracks"`
+	Failure                 FailureV3                 `json:"failure,omitzero"`
+	Capabilities            ClientCodecCapabilitiesV3 `json:"client_capabilities"`
+	ClientPlaybackContext   ClientPlaybackContextV3   `json:"client_playback_context"`
 }
 
 const (
 	RouteEventPlanSelectedV3               = "plan_selected"
 	RouteEventPlanInvalidatedV3            = "plan_invalidated"
 	RouteEventPlanFailedV3                 = "plan_failed"
+	RouteEventPlanSummaryV3                = "plan_summary"
 	RouteEventFirstFrameV3                 = "first_frame"
 	RouteEventTerminalV3                   = "terminal"
 	RouteEventStoppedV3                    = "stopped"
@@ -726,6 +765,7 @@ const (
 )
 
 var routeEventNamesV3 = []string{
+	RouteEventPlanSummaryV3,
 	RouteEventPlanSelectedV3,
 	RouteEventPlanInvalidatedV3,
 	RouteEventPlanFailedV3,
@@ -778,13 +818,13 @@ type RouteEventV3 struct {
 }
 
 type StreamV3 struct {
-	URL              string              `json:"url"`
+	URL              string              `json:"url" format:"uri-reference"`
 	Protocol         StreamProtocolV3    `json:"protocol"`
 	Container        string              `json:"container,omitempty"`
 	MIMEType         string              `json:"mime_type,omitempty"`
 	Headers          map[string]string   `json:"headers"`
 	HeaderRefresh    HeaderRefreshModeV3 `json:"header_refresh"`
-	HeaderRefreshURL string              `json:"header_refresh_url,omitempty"`
+	HeaderRefreshURL string              `json:"header_refresh_url,omitempty" format:"uri-reference"`
 }
 
 type TimelineV3 struct {
@@ -884,7 +924,7 @@ type ValidationClaimsV3 struct {
 }
 
 type SubtitleArtifactV3 struct {
-	URL                 string  `json:"url"`
+	URL                 string  `json:"url" format:"uri-reference"`
 	MIMEType            string  `json:"mime_type"`
 	Format              string  `json:"format"`
 	TimingOriginSeconds float64 `json:"timing_origin_seconds"`
@@ -897,10 +937,25 @@ type EmbeddedSubtitleV3 struct {
 	ContainerTrackID string `json:"container_track_id,omitempty"`
 }
 
+// HLSSubtitleRenditionV3 places the selected subtitle inside the plan's HLS
+// presentation: the stream URL is a multivariant playlist whose SUBTITLES
+// group GroupID holds the track as one WebVTT rendition named Name, segmented
+// on the video's own timeline.
+type HLSSubtitleRenditionV3 struct {
+	GroupID  string `json:"group_id"`
+	Name     string `json:"name"`
+	Format   string `json:"format"`
+	MIMEType string `json:"mime_type"`
+}
+
 type SubtitleDecisionV3 struct {
 	Embedded *EmbeddedSubtitleV3 `json:"embedded,omitempty"`
-	Mode     SubtitleModeV3      `json:"mode"`
-	TrackID  string              `json:"track_id,omitempty"`
+	// HLSRendition is the selected track carried in the HLS stream itself,
+	// mutually exclusive with Embedded and Artifact. It is published only to
+	// clients that negotiated hls_subtitle_renditions_v1.
+	HLSRendition *HLSSubtitleRenditionV3 `json:"hls_rendition,omitempty"`
+	Mode         SubtitleModeV3          `json:"mode"`
+	TrackID      string                  `json:"track_id,omitempty"`
 	// Artifact is the selected sidecar, mutually exclusive with Embedded. It exists only under
 	// SubtitleRenderV3 and SubtitleConvertV3; SubtitleOffV3 and
 	// SubtitleBurnInV3 have no client-fetchable artifact and must publish none,
@@ -934,11 +989,15 @@ type DegradationWarningV3 struct {
 	Message string `json:"message"`
 }
 
-// QualityOriginalV3 is the quality preference that pins the source ladder
-// rung: the plan must preserve the source's own height and bitrate rather than
-// pick a transcode rung. Distinct from OriginalLanguageSentinel, which selects
-// a track's original language.
+// QualityOriginalV3 labels the source entry of the frozen v1 quality menu.
+// As a quality preference it is a legacy alias of "auto", which already
+// preserves the source whenever the device can play it. Distinct from
+// OriginalLanguageSentinel, which selects a track's original language.
 const QualityOriginalV3 = "original"
+
+// QualityAutoV3 is the default quality preference: preserve the source unless
+// the device, a bandwidth cap, or the server rules it out.
+const QualityAutoV3 = "auto"
 
 // Compound ladder rung labels pin a bitrate as well as a resolution class.
 // The plain resolution labels remain valid for stored/default preferences;
@@ -954,12 +1013,15 @@ const (
 	QualityRung720pHighV3    = "720p-high"
 	QualityRung720pMediumV3  = "720p-medium"
 	QualityRung720pLowV3     = "720p-low"
+	QualityRung480pLowV3     = "480p-low"
+	QualityRung360pV3        = "360p"
 )
 
 // AvailableQualityV3 is one server-ladder rung valid for this source and
 // client, published on the plan so clients can render a quality menu without
-// owning a bitrate table. The QualityOriginalV3 entry preserves the source;
-// DisplayName gives compound rungs their human-facing High/Medium/Low label.
+// owning a bitrate table. The QualityOriginalV3 entry preserves the source
+// and is published on v1 only; DisplayName gives compound rungs their
+// human-facing High/Medium/Low label.
 type AvailableQualityV3 struct {
 	Label           string `json:"label"`
 	DisplayName     string `json:"display_name,omitempty"`
@@ -968,9 +1030,16 @@ type AvailableQualityV3 struct {
 	PreservesSource bool   `json:"preserves_source"`
 }
 
+type BandwidthLimitV3 struct {
+	Kbps      int    `json:"kbps"`
+	Source    string `json:"source"`
+	ExpiresAt string `json:"expires_at"`
+}
+
 type PlanV3 struct {
-	ProtocolVersion int    `json:"protocol_version"`
-	PlanID          string `json:"plan_id"`
+	BandwidthLimit  *BandwidthLimitV3 `json:"bandwidth_limit,omitempty"`
+	ProtocolVersion int               `json:"protocol_version"`
+	PlanID          string            `json:"plan_id"`
 	// PlanAttemptKey is the server-computed opaque loop-prevention token for
 	// this plan. Clients store the keys of attempted plans and echo them in
 	// attempted_plan_keys on replan; they never compute keys themselves.
@@ -994,6 +1063,10 @@ type PlanV3 struct {
 	EffectiveMediaFileID   int                    `json:"effective_media_file_id"`
 	Source                 SourceDescriptorV3     `json:"source"`
 	SubtitleFidelityPolicy string                 `json:"subtitle_fidelity_policy"`
+	// ActiveQuality is the AvailableQualities label this plan delivers, or
+	// empty when it delivers none of them (see activeQualityV3). Published
+	// on /api/v2 only, under FeaturePlanActiveQualityV3.
+	ActiveQuality string `json:"active_quality,omitempty"`
 }
 
 type TerminalV3 struct {
@@ -1047,7 +1120,13 @@ func (r *StartRequestV3) NormalizeAndValidate() ([]DegradationWarningV3, error) 
 	if r.ProgressPersistence == ProgressPersistenceClientV3 && r.StartPosition == nil {
 		return nil, errors.New("start_position is required when progress_persistence is client")
 	}
+	if err := validateBufferingQualityV3(r.ClientFeatures, r.BandwidthEstimateSource, r.LearnedLimit, r.BandwidthEstimateKbps, r.ObservedThroughputKbps); err != nil {
+		return nil, err
+	}
 	if err := validateOptionalBoundedIntV3(r.BandwidthEstimateKbps, 100, 1_000_000, "bandwidth_estimate_kbps"); err != nil {
+		return nil, err
+	}
+	if err := validateOptionalBoundedIntV3(r.ObservedThroughputKbps, 100, 1_000_000, "observed_throughput_kbps"); err != nil {
 		return nil, err
 	}
 	if err := validateOptionalBoundedIntV3(r.BandwidthCapKbps, 100, 1_000_000, "bandwidth_cap_kbps"); err != nil {
@@ -1083,10 +1162,8 @@ func (r *StartRequestV3) NormalizeAndValidate() ([]DegradationWarningV3, error) 
 
 func NormalizeQualityV3(value string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "auto":
-		return "auto", false
-	case QualityOriginalV3, "source", "max":
-		return QualityOriginalV3, false
+	case "", QualityAutoV3, QualityOriginalV3, "source", "max":
+		return QualityAutoV3, false
 	case "2160p", "4k", "uhd":
 		return "2160p", false
 	case "1080p", "fhd":
@@ -1124,7 +1201,13 @@ func (r *ReplanRequestV3) Validate() error {
 			return errors.New("invalid local mutation")
 		}
 	}
+	if err := validateBufferingQualityV3(r.ClientFeatures, r.BandwidthEstimateSource, r.LearnedLimit, r.BandwidthEstimateKbps, r.ObservedThroughputKbps); err != nil {
+		return err
+	}
 	if err := validateOptionalBoundedIntV3(r.BandwidthEstimateKbps, 100, 1_000_000, "bandwidth_estimate_kbps"); err != nil {
+		return err
+	}
+	if err := validateOptionalBoundedIntV3(r.ObservedThroughputKbps, 100, 1_000_000, "observed_throughput_kbps"); err != nil {
 		return err
 	}
 	if err := validateOptionalBoundedIntV3(r.BandwidthCapKbps, 100, 1_000_000, "bandwidth_cap_kbps"); err != nil {
@@ -1461,10 +1544,14 @@ func HasFeatureV3(features []string, wanted string) bool {
 //   - subrip_sidecar_v1 picks the representation of every SRT sidecar URL.
 //     Switching it mid-attempt would publish one track under two URLs, and a
 //     seek reanchor must reproduce the frozen plan's artifact exactly.
+//   - hls_subtitle_renditions_v1 decides whether the transcode's stream URL
+//     is a multivariant playlist carrying the subtitle or a media playlist
+//     beside a sidecar. A reused HLS transport keeps the shape it was built
+//     with, so the attempt has to keep the same answer.
 //
 // Stop/start is the explicit boundary for changing any of them.
 func AttemptStickyFeaturesV3() []string {
-	return []string{FeatureHeaderAuthenticatedMediaV3, FeatureAuthorizedMediaOriginsV3, FeatureSoftwareVideoDecodeV3, FeatureSubripSidecarV3, FeatureMarkerThumbnailsV3}
+	return []string{FeatureHeaderAuthenticatedMediaV3, FeatureAuthorizedMediaOriginsV3, FeatureSoftwareVideoDecodeV3, FeatureSubripSidecarV3, FeatureMarkerThumbnailsV3, FeatureHLSSubtitleRenditionsV3}
 }
 
 // PinAttemptStickyFeaturesV3 returns requested with every attempt-sticky
@@ -1509,4 +1596,26 @@ func boundExceedsV3(output, panel int) bool {
 
 func boundExceedsFloatV3(output, panel float64) bool {
 	return panel > 0 && (output == 0 || output > panel)
+}
+
+func validateBufferingQualityV3(features []string, source, limit string, estimate, observed *int) error {
+	if source == "" && limit == "" && observed == nil {
+		return nil
+	}
+	if !HasFeatureV3(features, FeatureBufferingQualityV1) {
+		return errors.New("buffering_quality_v1 is required for buffering quality fields")
+	}
+	if source != "" && source != BandwidthEstimateProbeV3 && source != BandwidthEstimateObservedRebufferV3 {
+		return errors.New("invalid bandwidth_estimate_source")
+	}
+	if source != "" && estimate == nil {
+		return errors.New("bandwidth_estimate_source requires bandwidth_estimate_kbps")
+	}
+	if observed != nil && source != BandwidthEstimateObservedRebufferV3 {
+		return errors.New("observed_throughput_kbps requires bandwidth_estimate_source observed_rebuffer")
+	}
+	if limit != "" && limit != LearnedLimitIgnoreV3 && limit != LearnedLimitClearV3 {
+		return errors.New("invalid learned_limit")
+	}
+	return nil
 }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Silo-Server/silo-server/internal/policy"
+	"github.com/Silo-Server/silo-server/internal/sections/recipes"
 
 	chimw "github.com/go-chi/chi/v5/middleware"
 
@@ -1760,7 +1761,70 @@ func fixtureCases() []fixtureCase {
 	cases = append(cases, pushRegistrationReceiptFixtureCases()...)
 	cases = append(cases, adminNotificationPushDeliveryFixtureCases()...)
 	cases = append(cases, unmatchedItemIgnoreFixtureCases()...)
-	return append(cases, notInterestedFixtureCases()...)
+	cases = append(cases, notInterestedFixtureCases()...)
+	cases = append(cases, notificationSeriesFixtureCases()...)
+	cases = append(cases, notificationSeriesMuteFixtureCases()...)
+	cases = append(cases, seasonalThemeFixtureCases()...)
+	return append(cases, personalListMembershipFixtureCases()...)
+}
+
+// personalListMembershipFixtureCases covers the favorites and watchlist
+// membership reads, which answer a non-member with 200 rather than 404.
+func personalListMembershipFixtureCases() []fixtureCase {
+	problem := "#/components/schemas/Problem"
+	return []fixtureCase{
+		{name: "get_favorite_membership_member", operationID: "getFavoriteMembership",
+			scenario: "The item is one of the profile's favorites: is_member true with when it was added.",
+			method:   http.MethodGet, path: "/api/v2/favorites/movie:c/membership", headers: with(bearer(memberToken), "X-Profile-Id", "p-owner"),
+			status: http.StatusOK, assertHeaders: []string{"Content-Type", "Cache-Control"}, schema: "#/components/schemas/PersonalListMembership"},
+		{name: "get_favorite_membership_not_member", operationID: "getFavoriteMembership",
+			scenario: "The item is not one of the profile's favorites: 200 with is_member false, not a 404.",
+			method:   http.MethodGet, path: "/api/v2/favorites/movie:nope/membership", headers: with(bearer(memberToken), "X-Profile-Id", "p-owner"),
+			status: http.StatusOK, assertHeaders: []string{"Content-Type", "Cache-Control"}, schema: "#/components/schemas/PersonalListMembership"},
+		{name: "get_favorite_membership_not_found", operationID: "getFavoriteMembership",
+			scenario: "An item the viewer may not see is 404.",
+			method:   http.MethodGet, path: "/api/v2/favorites/movie:hidden/membership", headers: with(bearer(memberToken), "X-Profile-Id", "p-owner"),
+			status: http.StatusNotFound, assertHeaders: []string{"Content-Type", "Cache-Control"}, schema: problem},
+		{name: "get_personal_list_capability_ok", operationID: "getPersonalListCapability",
+			scenario: "The personal-list capability document: the favorites and watchlist membership reads are supported.",
+			method:   http.MethodGet, path: "/api/v2/capabilities/personal-lists", headers: with(bearer(memberToken), "X-Profile-Id", "p-owner"),
+			status: http.StatusOK, assertHeaders: []string{"Content-Type", "Cache-Control", "ETag"}, schema: "#/components/schemas/PersonalListCapability"},
+		{name: "get_watchlist_membership_member", operationID: "getWatchlistMembership",
+			scenario: "The item is on the profile's watchlist: is_member true with when it was added.",
+			method:   http.MethodGet, path: "/api/v2/watchlist/series:c/membership", headers: with(bearer(memberToken), "X-Profile-Id", "p-owner"),
+			status: http.StatusOK, assertHeaders: []string{"Content-Type", "Cache-Control"}, schema: "#/components/schemas/PersonalListMembership"},
+		{name: "get_watchlist_membership_not_member", operationID: "getWatchlistMembership",
+			scenario: "The item is not on the profile's watchlist: 200 with is_member false, not a 404.",
+			method:   http.MethodGet, path: "/api/v2/watchlist/series:nope/membership", headers: with(bearer(memberToken), "X-Profile-Id", "p-owner"),
+			status: http.StatusOK, assertHeaders: []string{"Content-Type", "Cache-Control"}, schema: "#/components/schemas/PersonalListMembership"},
+	}
+}
+
+// fixtureSeasonalThemes is recipes.SeasonalThemes with every list link moved
+// to a reserved host, so the committed fixture names no real list site. The
+// web editor tests use the resulting fixture as their catalog.
+func fixtureSeasonalThemes() []recipes.SeasonalTheme {
+	themes := make([]recipes.SeasonalTheme, 0, len(recipes.SeasonalThemes))
+	for _, theme := range recipes.SeasonalThemes {
+		vibes := make([]recipes.SeasonalVibe, len(theme.Vibes))
+		for i, vibe := range theme.Vibes {
+			vibe.ListURL = strings.Replace(vibe.ListURL, "https://mdblist.com/", "https://lists.example.test/", 1)
+			vibes[i] = vibe
+		}
+		theme.Vibes = vibes
+		themes = append(themes, theme)
+	}
+	return themes
+}
+
+// seasonalThemeFixtureCases pin the Seasonal Picks holiday catalog.
+func seasonalThemeFixtureCases() []fixtureCase {
+	return []fixtureCase{
+		{name: "list_seasonal_themes_ok", operationID: opListSeasonalThemes,
+			scenario: "The holidays a Seasonal Picks row can follow in calendar order, each with its curated vibes; a holiday that moves or recurs weekly has no start and end, and a weekly one cannot take a row's own dates.",
+			method:   http.MethodGet, path: "/api/v2/sections/seasonal-themes", headers: with(bearer(memberToken), "X-Profile-Id", "p-owner"),
+			status: http.StatusOK, assertHeaders: []string{"Content-Type", "Cache-Control"}, schema: "#/components/schemas/SeasonalThemeCatalog"},
+	}
 }
 
 // notInterestedFixtureCases pin the Not interested marks: the paged list, one
@@ -1999,6 +2063,7 @@ func fixtureDeps() Dependencies {
 		LocalTLSPin: "n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=",
 	}
 	deps.SubtitleAIReads = &fakeSubtitleAIReads{}
+	deps.SeasonalThemes = fixtureSeasonalThemes()
 	deps.Downloads = &fakeDownloadRegistry{}
 	deps.DownloadCreation = &fakeDownloadCreation{row: &downloads.Download{ID: "entry", ContentID: "movie", MediaFileID: 42, Revision: 1, CreatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), Status: downloads.StatusReady, Quality: downloads.QualityOriginal, EffectiveQuality: downloads.QualityOriginal, Format: downloads.FormatOriginal, DeviceID: "device-one"}, page: downloads.CreatePage{BatchID: "intent", Skipped: []downloads.SkippedDownload{{EpisodeID: "missing", Reason: "no_file"}}}}
 	deps.DownloadSubscriptionMutations = &fakeSubscriptionMutations{row: syntheticDownloadSubscription()}
@@ -2106,6 +2171,7 @@ func fixtureDeps() Dependencies {
 	deps.NotificationDiscordLinks = new(fakeNotificationDiscordLinks)
 	deps.NotificationRelay = new(fakeNotificationRelay)
 	deps.NotificationChannels = new(fakeNotificationChannels)
+	deps.NotificationDiscordManagement = discordManagement([]userstore.Profile{{ID: "p-primary", IsPrimary: true}})
 	deps.NotificationDestinations = new(fakeNotificationDestinations)
 	accounts := fixtureAdminAccounts()
 	accounts.allowImpersonation = true
@@ -2199,6 +2265,10 @@ func generateFixtures(t *testing.T) map[string][]byte {
 			}
 		} else {
 			r = httptest.NewRequest(c.method, c.path, nil)
+		}
+		// Absolute discovery URLs in published fixtures use a reserved test host.
+		if r.URL.Path == Prefix+"/playback/capabilities" {
+			r.Host = "api.example.test"
 		}
 		for k, v := range c.headers {
 			r.Header.Set(k, v)

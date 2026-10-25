@@ -61,9 +61,9 @@ task's triggers with its configured poll interval.
 
 Uploadable images white-label the server: the sidebar wordmark, the square
 mark (collapsed sidebar and installed PWA), the browser favicon, and the login
-background. Each is stored in the public S3 bucket and referenced from a
-`server_settings` row, so uploads return `503 unavailable` until
-`s3.public_bucket` is configured.
+background. Each is stored in artwork storage (`artwork.storage_backend`: a
+local directory, or the public S3 bucket when the backend is S3) and referenced
+from a `server_settings` row, so uploads work without an S3 bucket.
 
 | Route                                         | Auth   | Purpose                                                              |
 | --------------------------------------------- | ------ | -------------------------------------------------------------------- |
@@ -190,7 +190,10 @@ display names come from `/api/v2/network-access/capabilities`.
 `stream_location` on each v2 admin session row reports `local` or `remote` using
 the same trusted client-IP and provider-path classification as the bitrate
 policy. Private, loopback, and link-local clients on the default path are local;
-provider paths and public or unknown client addresses are remote. The web
+provider paths and public or unknown client addresses are remote. A client is
+also unknown, and so remote, when its request came through a forwarder outside
+`clientip.trusted_proxies`, or a trusted proxy's forwarding headers name no
+usable client address: the resolved address is then the forwarder's own. The web
 Activity panel shows this separately from the access-network badge.
 `GET /api/v2/admin/sessions/capabilities` advertises `stream_location` for client
 feature detection. The displayed location is fixed at playback negotiation,
@@ -1081,7 +1084,7 @@ Each entry:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `provider` | string | Provider key: `trakt`, `simkl`, or `mdblist` for the first-party plugins, otherwise `plugin:<installation id>:<capability id>`. |
+| `provider` | string | Provider key: `simkl` or `mdblist` for the first-party plugins, otherwise `plugin:<installation id>:<capability id>`. |
 | `display_name` | string | Human name from the registry, or the key when the provider is not registered. |
 | `registered` | bool | False when the provider only exists in stored rows. |
 | `scrobbling` | bool | The provider declares the scrobble-playback capability. |
@@ -1127,8 +1130,8 @@ Each entry:
       "scrobbles_24h": 0
     },
     {
-      "provider": "trakt",
-      "display_name": "Trakt",
+      "provider": "simkl",
+      "display_name": "Simkl",
       "registered": true,
       "scrobbling": true,
       "exporting": true,
@@ -1341,15 +1344,15 @@ season binge reads as one show and a title's `media_item_id` is a series
 content id for TV.
 
 `total_seconds` is **watched time**, summed from finalized playback sessions
-(`admin_playback_history.watched_seconds`) that *ended* inside the same window
+(`admin_playback_history`) that *ended* inside the same window
 — the same stop instant `watched_at` records, so plays and watch time see the
 same sessions — not the runtime of what was played. Watch history records the media's full duration,
 so summing that would report three hours for a movie someone abandoned after a
-minute. An entry with no finalized session in the window reports `0`. Because
-`watched_seconds` records a session's final absolute position, a resumed
-session would claim the already-watched stretch again, so each
-session's contribution is capped at its wall-clock length; the figure is an
-estimate until playback records true elapsed viewing time.
+minute. An entry with no finalized session in the window reports `0`. Each
+session contributes its measured watch time (`played_seconds`, below). A
+session recorded before watch time was measured only knows where it ended
+(`watched_seconds`), so its end position is capped at its wall-clock length;
+that estimate still counts pauses and seeks.
 
 Profile display names live in the per-user stores rather than in watch history,
 so they are read back from that profile's most recent `admin_playback_history`
@@ -1494,7 +1497,10 @@ read the live log. Account and file identifiers are strings, instants are RFC 33
 `duration_seconds` is null when the media duration was never recorded. A deleted account
 lists with an empty `username`; an item no longer in the catalog lists with an empty
 `media_title` and `media_type`. The stored client address is not part of this projection,
-matching v1. A missing database returns 503; storage errors are masked as 500.
+matching v1. It is the viewer's last address on the playback session. Rows written by
+earlier server versions hold the address of the request that ended the attempt instead:
+the administrator's when an administrator stopped or terminated it, and none when it
+expired. A missing database returns 503; storage errors are masked as 500.
 
 Two v2-only additions have no v1 counterpart. `ended_after` (an RFC 3339 instant) keeps
 attempts that ended at or after it; an unparsable value is 422, and the cursor binds it
@@ -1502,6 +1508,20 @@ like the other filters, so a cursor from one window is refused under another. Ea
 also carries `series_title`, `season_number` and `episode_number`: for an episode attempt
 they come from the catalog episode and its series (`series_title` is empty when the series
 left the catalog); for anything else they are empty and null.
+
+`watched_seconds` is where the attempt ended, not how long it was watched: an attempt
+resumed partway through reports the resume point plus what was watched. `played_seconds`
+is the measured watch time: media advanced through by normal playback, without pauses,
+seeks or buffering. The playback session measures it from its progress reports
+(`playback.WatchTime`): a position advance between two reports counts as watched when it
+fits playback at up to twice normal speed plus a short allowance for report jitter, and
+anything larger is a seek. Time after the last progress report before the stop is not
+counted. It is null for an attempt with no measurement, which includes every attempt
+recorded before measurement existed. A session finalized more than once keeps the largest
+measurement when the copies overlap in time (copies on several replicas), and adds them when
+one began measuring after the other ended (a session rebuilt under the same id after it was
+finalized). The history row also stores the first reported
+position and the time spent paused; the route does not expose them.
 
 The administrator history page and the user detail watch-history tab read this route
 under the authority captured when the query was created, keyed by an opaque authority
@@ -1515,7 +1535,8 @@ for source configuration and `/api/v2/admin/history-imports` for mappings, crede
 and runs. All operations require an acting administrator. Mutations enforce the
 demo restriction; reads do not.
 `GET /api/v2/admin/history-imports/capabilities` reports availability, guarded
-configuration, durable administrative runs, and the 200-mapping bulk limit.
+configuration, durable administrative runs, the 200-mapping bulk limit, and
+`played_lookback` with its `max_lookback_hours` bound.
 
 Read a source or mapping by ID before editing it. The response contains its canonical
 configuration and a strong `ETag`. Send that exact tag in `If-Match` on source,
@@ -1547,6 +1568,29 @@ locations when available, and counts for each outcome. A source with more than 2
 mappings is rejected before any run admission. Bulk work is partially successful;
 it is not an atomic transaction across mappings. Mutations are not automatically
 retryable after an uncertain response.
+
+Run and bulk start take an optional body. Without one, with an empty or
+whitespace-only body (whatever its `Content-Type`), or with `lookback_hours`
+omitted or `null`, a run imports the full history; any other body must be
+`application/json`. `{"lookback_hours": N}`, N a plain JSON integer (1 to 8760),
+imports only items last played in the N hours before the run was queued: the
+cutoff is fixed at admission and stored with the run, so a run that waits in the
+queue still reads its window, and a bulk start gives every run one cutoff.
+Resume positions and favorites are still read in full. A lookback never removes
+or un-marks anything: items outside the window are left as they are. Because
+favorites are read in full, an item un-favorited in Silo but still a favorite in
+Jellyfin is favorited again by every run, as a full import already does;
+scheduled lookback runs make that more noticeable. If Jellyfin does not return
+plays newest first, the run reads the full played history instead and records a
+warning saying so. A play during the read can move an unread item ahead of the
+pages already read; the run detects that, reads the window again once, and falls
+back to the full played history if the list moves again. Only Jellyfin sources support it; an Emby or Plex source
+answers 422 `validation_failed`, and a bulk start on one queues nothing. A
+completed lookback run does not update the mapping's `last_imported_at`, which
+records the last completed full import. Run responses carry the cutoff as
+`played_since`, absent for a full import. The intended pattern is one full
+import per mapping, then recurring lookback runs with a window comfortably wider
+than the interval between them.
 
 Cancellation records intent. A queued run can become cancelled immediately; a running
 worker acknowledges cancellation at its next boundary. Pending cancellation returns
@@ -2270,7 +2314,8 @@ the handshake is served on this process, the protocol (`silo.admin-logs.v2`) and
 selections (`app`, `audit`). `POST /api/v2/admin/logs/ws-ticket` (`createAdminLogsSocketTicket`)
 delegates the acting administrator's current access-token login session for one connection.
 API keys and credentials without a bounded expiry cannot mint; a login whose effective role is
-not administrator (a secondary profile on an administrator account) is refused with 403. The
+not administrator (a secondary profile on an administrator account, or a profile-less session
+on a household with a PIN-protected or access-limited profile) is refused with 403. The
 ticket is opaque, single-use, expires within 30 seconds and binds the account, login session,
 role, profile proof and resolved access scope. The response carries `ticket`, `expires_in`,
 `max_connection_seconds` (300) and `protocol`, is not cached, and minting is naturally
@@ -2288,7 +2333,8 @@ proof and administrator role are validated again before 101.
 
 The connection ends at the earlier of five minutes or access-token expiry, and the handler
 rechecks session, account, profile and administrator role every 15 seconds with a two-second
-bound; a failed check or a demotion closes the socket. Reconnect with a newly minted credential;
+bound; a failed check or a demotion closes the socket, including once the household of a
+profile-less session gains a PIN-protected or access-limited profile. Reconnect with a newly minted credential;
 this is bounded revocation detection, not instantaneous. Without Redis the ticket is
 process-local and requires affinity to the minting node.
 
@@ -2641,6 +2687,17 @@ queued when it finishes, covers the change. Paths are capped at 1024 bytes, and 
 characters in them are stored as U+FFFD. `q` also matches the reported and
 rewritten paths in the change log. Nested `scan_runs` carry the same optional
 `result` as the scan history.
+
+Events are not kept forever. The `cleanup_autoscan_events` step of the daily
+`database_maintenance` task deletes finished events that completed more than
+`autoscan.events_retention_days` ago (server setting, default 30, accepted range
+1..3650). Running events, and events with a scan run still accepted or running,
+are kept. A scan run whose event was pruned stays in the scan history but loses
+the fields it took from the event: `autoscan_event_id`, `source_id`, `plugin_id`,
+`capability_id`, `event_status` and `event_completed_at`. The Activity panel then
+labels it Autoscan instead of the source, and scan search no longer matches it by
+source, capability or event status. The status `latest_event_at` is absent once
+every event is gone.
 
 The Activity panel keeps polling and numbered pages through at most100 cursor
 reads per requested page. Captured authority/PIN cache identity, stale-response
@@ -3124,7 +3181,9 @@ repeat finds no row, so a later 404 is not this caller's receipt; non-retryable.
 `archive` part, capped at 256 MiB; JSON on this operation is 415, a missing part 422 at
 `body.archive`, an oversize body 413. A zip archive is installed from its manifest; any
 other file is treated as a plugin binary whose manifest the server obtains by executing
-it, exactly as v1 does. Success is 201 with the installation. Non-retryable: the same
+it, exactly as v1 does. Either way, the server ignores manifest fields and enum values it
+doesn't know, such as ones a newer SDK added, so such a plugin still installs and starts;
+the stored manifest keeps them as the plugin wrote them. Success is 201 with the installation. Non-retryable: the same
 plugin_id is replaced, so a delayed retry can replace a newer installation. The frozen
 bridge route keeps its own answers (an oversize or malformed form is 400 `bad_request`).
 
@@ -3174,6 +3233,8 @@ automatically. A revision precondition (`If-Match`) is a follow-up, not part of 
 `POST /api/v2/admin/plugins/installations/{id}/config/test` probes one prospective entry:
 the server starts a temporary plugin instance with the merged configuration, runs the
 plugin's connection check under a 20 s timeout, and stops the instance. Nothing is stored.
+A metadata provider is checked with a movie search; a marker provider is asked for its
+account statistics, which need the staged credentials.
 A completed failed check, including a plugin without connection-check support, is a 200
 result with `success` false and the message; only transport or store failures are problems.
 The probe launches a process and may call a billed provider, so it is non-retryable: the

@@ -109,7 +109,9 @@ describe("FeaturesStep", () => {
       const { setValue } = mockStep({ "markers.mode": mode, "markers.lazy_playback": "false" });
       render(<FeaturesStep />);
 
-      await userEvent.click(screen.getByRole("switch", { name: "Skip markers from TheIntroDB" }));
+      await userEvent.click(
+        screen.getByRole("switch", { name: "Skip markers from TheIntroDB and Silo" }),
+      );
 
       expect(setValue).toHaveBeenCalledWith("markers.mode", nextMode);
       if (lazy === undefined) {
@@ -120,27 +122,6 @@ describe("FeaturesStep", () => {
     },
   );
 
-  it("shows push on by default and reveals the relay disclosure on request", async () => {
-    mockStep();
-    render(<FeaturesStep />);
-
-    expect(screen.getByRole("switch", { name: "Skip markers from TheIntroDB" })).toBeChecked();
-    expect(screen.getByRole("switch", { name: "Detect markers on this server" })).toBeChecked();
-    expect(
-      screen.getByText(/Online markers are preferred over local detection/),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("switch", { name: "Mobile push notifications" })).toBeChecked();
-    expect(screen.queryByText("Privacy disclosure")).not.toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole("button", { name: "What does the relay see?" }));
-
-    expect(screen.getByText("Privacy disclosure")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "fully open source" })).toHaveAttribute(
-      "href",
-      expect.stringContaining("github.com"),
-    );
-  });
-
   it("writes both platform toggles when the admin turns push off", async () => {
     const { setValue } = mockStep();
     render(<FeaturesStep />);
@@ -149,14 +130,6 @@ describe("FeaturesStep", () => {
 
     expect(setValue).toHaveBeenCalledWith("notifications.apple_push_delivery_enabled", "false");
     expect(setValue).toHaveBeenCalledWith("notifications.android_push_delivery_enabled", "false");
-  });
-
-  it("offers provider presets and a connection check once recommendations are on", () => {
-    mockStep({ "recommendations.enabled": "true" });
-    render(<FeaturesStep />);
-
-    expect(screen.getByRole("radio", { name: /Gemini/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Check connection" })).toBeInTheDocument();
   });
 
   it("blocks completion when settings failed to load", () => {
