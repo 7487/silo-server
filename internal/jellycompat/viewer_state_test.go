@@ -431,7 +431,7 @@ func TestUserDataDateBounds(t *testing.T) {
 			h := NewUserDataHandler(&stubContentService{detail: &upstreamItemDetail{ContentID: "movie-1", Type: "movie"}}, service, codec, &config.Config{})
 			session := &Session{StreamAppUserID: 1, ProfileID: "profile-1"}
 			recorder := httptest.NewRecorder()
-			before := time.Now().UTC()
+			before := time.Now().UTC().Truncate(time.Millisecond)
 			h.HandleUpdateUserData(recorder, viewerRequest("POST", "/", `{"Played":true,"LastPlayedDate":"`+tc.supplied+`"}`, "itemId", codec.EncodeStringID(EncodedIDItem, "movie-1"), session))
 			after := time.Now().UTC()
 			if recorder.Code != http.StatusOK {
