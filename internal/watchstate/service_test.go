@@ -26,24 +26,16 @@ func (p testStoreProvider) Close() error {
 	return nil
 }
 
-func TestJellycompatDatesBoundFutureEventTime(t *testing.T) {
+// TestJellycompatDatedMarkPlayedBoundsFutureDate covers the datePlayed path;
+// jellycompat's TestUserDataDateBounds covers LastPlayedDate.
+func TestJellycompatDatedMarkPlayedBoundsFutureDate(t *testing.T) {
 	store, db := newTestUserStore(t)
 	t.Cleanup(func() { _ = db.Close() })
 	createWatchstateProfile(t, store)
 
 	before := time.Now().UTC().Add(-time.Second)
-	future := before.Add(24 * time.Hour)
 	service := NewService(testStoreProvider{store: store})
-	if err := service.RecordJellycompatProgress(t.Context(), 1, "profile-1", userstore.JellycompatProgressEdit{
-		MediaItemID:     "movie-1",
-		PositionSeconds: 123,
-		DurationSeconds: 600,
-		Completed:       true,
-		EventAt:         future,
-	}, new(true)); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.RecordJellycompatMarkPlayedBatch(t.Context(), 1, "profile-1", []string{"movie-2"}, future); err != nil {
+	if err := service.RecordJellycompatMarkPlayedBatch(t.Context(), 1, "profile-1", []string{"movie-1"}, before.Add(24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	after := time.Now().UTC().Add(time.Second)
@@ -51,30 +43,20 @@ func TestJellycompatDatesBoundFutureEventTime(t *testing.T) {
 	reader := store.(interface {
 		ListJellycompatProgressDates(context.Context, string, []string) (map[string]string, error)
 	})
-	dates, err := reader.ListJellycompatProgressDates(t.Context(), "profile-1", []string{"movie-1", "movie-2"})
+	dates, err := reader.ListJellycompatProgressDates(t.Context(), "profile-1", []string{"movie-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	eventAtByID := make(map[string]time.Time, len(dates))
-	for _, mediaItemID := range []string{"movie-1", "movie-2"} {
-		eventAt, err := time.Parse(time.RFC3339Nano, dates[mediaItemID])
-		if err != nil {
-			t.Fatal(err)
-		}
-		if eventAt.Before(before) || eventAt.After(after) {
-			t.Fatalf("%s future event time was not bounded to server time: %s", mediaItemID, eventAt)
-		}
-		eventAtByID[mediaItemID] = eventAt
+	eventAt, err := time.Parse(time.RFC3339Nano, dates["movie-1"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eventAt.Before(before) || eventAt.After(after) {
+		t.Fatalf("future event time was not bounded to server time: %s", eventAt)
 	}
 	history, err := store.ListHistory(t.Context(), "profile-1", 10, 0)
-	if err != nil || len(history) != 2 {
+	if err != nil || len(history) != 1 || history[0].WatchedAt != eventAt.Truncate(time.Second).Format(time.RFC3339) {
 		t.Fatalf("history and progress dates disagree: %+v %v", history, err)
-	}
-	for _, entry := range history {
-		watchedAt, parseErr := time.Parse(time.RFC3339Nano, entry.WatchedAt)
-		if parseErr != nil || !watchedAt.Equal(eventAtByID[entry.MediaItemID].Truncate(time.Second)) {
-			t.Fatalf("history and progress dates disagree for %s: %s != %s", entry.MediaItemID, entry.WatchedAt, dates[entry.MediaItemID])
-		}
 	}
 }
 
